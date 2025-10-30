@@ -11,7 +11,7 @@ def process_sql_script_with_prefix(sql_content, num_files_to_create=2):
         num_files_to_create (int): The maximum number of YAML files to create.
     """
     lines = sql_content.strip().split('\n')
-    output_dir = "view_yamls_modified"
+    output_dir = "view_yamls_full_names" # Changed output directory for clarity
     os.makedirs(output_dir, exist_ok=True)
 
     files_created = 0
@@ -22,57 +22,55 @@ def process_sql_script_with_prefix(sql_content, num_files_to_create=2):
 
         line = line.strip()
         if line.startswith("create or replace secure view"):
-            # Regex to capture view name and source table name
+            # Adjusted regex to capture the full view name part
+            # including SV_REF_, SV_IBOR_, or SV_MKT_
             match = re.match(
                 r"create or replace secure view "
-                r"ALADDINDB\.INVESTMENTS\.SV_REF_(\w+)\s+AS\s+SELECT\s+\*\s+FROM\s+"
-                r"EDP_ADC_PUB_DB\.ADC_PUB_LL\.SV_REF_(\w+);",
+                r"ALADDINDB\.INVESTMENTS\.(SV_(?:REF|IBOR|MKT)_\w+)\s+AS\s+SELECT\s+\*\s+FROM\s+"
+                r"EDP_ADC_PUB_DB\.ADC_PUB_LL\.(SV_(?:REF|IBOR|MKT)_\w+);",
                 line
             )
 
             if match:
-                view_name_suffix = match.group(1)
-                source_table_suffix = match.group(2)
+                # view_name_full will now include the SV_REF_, SV_IBOR_, or SV_MKT_ prefix
+                view_name_full = match.group(1)
+                source_table_full = match.group(2) # Though not directly used for file name here, useful to capture
 
-                full_view_name = (
-                    f"ALADDINDB.INVESTMENTS.SV_REF_{view_name_suffix}"
+                full_view_path = (
+                    f"ALADDINDB.INVESTMENTS.{view_name_full}"
                 )
-                full_source_table_name = (
-                    f"EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_{source_table_suffix}"
+                full_source_table_path = (
+                    f"EDP_ADC_PUB_DB.ADC_PUB_LL.{source_table_full}"
                 )
 
-                yaml_filename = f"{view_name_suffix}.yaml"
+                yaml_filename = f"{view_name_full}.yaml" # Use the full name for the file
                 yaml_filepath = os.path.join(output_dir, yaml_filename)
 
-                # --- NEW: Define the prefix YAML content ---
+                # Define the prefix YAML content
                 prefix_yaml_content = f"""
 databaseChangeLog:
   - changeSet:
-      id: SV_{view_name_suffix}-view-1 # Modified ID
-      author: kvishwaj # Modified Author
+      id: {view_name_full}-view-1 # ID now uses the full view name
+      author: kvishwaj
       runOnChange: true
       changes:
         - createView:
             fullDefinition: true
             remarks: ''
-            viewName: {view_name_suffix}
+            viewName: {view_name_full} # viewName also uses the full name
             schemaName: INVESTMENTS
             selectQuery: >
 """
-                # --- END NEW ---
-
                 # Indent the selectQuery SQL to match the YAML structure
-                # The 'line' variable already contains the SQL string
                 indented_sql = f"              {line}\n"
-
 
                 yaml_content = prefix_yaml_content + indented_sql
 
                 try:
                     with open(yaml_filepath, 'w') as f:
-                        f.write(yaml_content.strip()) # .strip() to remove leading/trailing newlines from prefix
+                        f.write(yaml_content.strip())
                     print(f"Created {yaml_filepath}")
-                    files_created += 1 # Increment counter only if file is created
+                    files_created += 1
                 except IOError as e:
                     print(f"Error writing file {yaml_filepath}: {e}")
             else:

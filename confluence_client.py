@@ -1,7 +1,3 @@
-
-pip install requests beautifulsoup4 python-dotenv
-
-
 # confluence_client.py
 import requests
 from bs4 import BeautifulSoup
@@ -11,38 +7,42 @@ import os # For checking if .env loaded
 class ConfluencePageParser:
     def __init__(self):
         self.base_url = ConfluenceConfig.BASE_URL
-        self.username = ConfluenceConfig.USERNAME
-        self.api_token = ConfluenceConfig.API_TOKEN
+        # self.username = ConfluenceConfig.USERNAME # No longer directly used for Bearer auth
+        self.api_token = ConfluenceConfig.API_TOKEN # This is now the Bearer token
         self.space_key = ConfluenceConfig.SPACE_KEY
         self.page_title = get_confluence_page_title()
 
-        if not all([self.base_url, self.username, self.api_token, self.space_key]):
+        if not all([self.base_url, self.api_token, self.space_key]): # Removed username from check
             raise ValueError(
                 "Confluence configuration is incomplete. "
-                "Please ensure CONFLUENCE_BASE_URL, CONFLUENCE_USERNAME, "
-                "CONFLUENCE_API_TOKEN, and CONFLUENCE_SPACE_KEY "
-                "are set in your environment variables or .env file."
+                "Please ensure CONFLUENCE_BASE_URL, CONFLUENCE_API_TOKEN, "
+                "and CONFLUENCE_SPACE_KEY are set in your environment variables or .env file."
             )
 
     def _get_page_id_by_title(self, title):
         """
-        Retrieves the page ID for a given page title in a specific space.
+        Retrieves the page ID and content for a given page title in a specific space.
+        Uses Bearer token authentication.
         """
         search_url = f"{self.base_url}/rest/api/content"
+        
+        # --- IMPORTANT CHANGE HERE ---
         headers = {
-            "Accept": "application/json"
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self.api_token}" # Use Bearer token
         }
-        auth = (self.username, self.api_token)
+        # We no longer pass an 'auth' tuple with username/password
+
         params = {
             "title": title,
             "spaceKey": self.space_key,
-            "expand": "body.storage", # Request page content in storage format
+            "expand": "body.storage",
             "limit": 1
         }
 
         print(f"Searching for page '{title}' in space '{self.space_key}'...")
-        response = requests.get(search_url, headers=headers, auth=auth, params=params)
-        response.raise_for_status() # Raise an exception for HTTP errors
+        response = requests.get(search_url, headers=headers, params=params) # Removed auth=auth
+        response.raise_for_status()
 
         data = response.json()
         if data and data["results"]:
@@ -63,26 +63,41 @@ class ConfluencePageParser:
         if not page_id or not page_content_html:
             print("Could not retrieve page content. Exiting.")
             return None, None
-
+        
+        # Confluence Storage Format can be tricky, it's not always clean HTML.
+        # It's an XML-like format. BeautifulSoup can often parse it.
         soup = BeautifulSoup(page_content_html, 'html.parser')
         
         # --- Extract Header Information ---
         table_name = None
-        source_table_full_name = None
-        # You'll need to inspect the HTML structure of your page's "Destination" section
-        # The provided image shows it's likely paragraphs or strong tags.
-        # This is a heuristic and might need adjustment.
         
-        # Example: looking for "Table name: portfolio_ops"
-        table_name_tag = soup.find(lambda tag: tag.name == "p" and "Table name:" in tag.text)
+        # Inspect the HTML to find the "Table name: portfolio_ops" part.
+        # It was originally in a <p> tag, but it might be different in storage format.
+        # Let's try to be flexible.
+        table_name_tag = soup.find(lambda tag: tag.name in ['p', 'strong', 'h1', 'h2', 'h3'] and "Table name:" in tag.text)
         if table_name_tag:
             table_name = table_name_tag.text.split("Table name:")[1].strip()
         
-        # Example: looking for "Source table" in the table content itself,
-        # or from a different section if it's explicitly mentioned there.
-        # For now, let's assume it's "portdb_portfolio_ops" as observed in the image
-        # and we can make this more dynamic later if needed.
-        source_table_full_name = "portdb_portfolio_ops" # Hardcoding for prototype, can be dynamic
+        # For prototype, use observed source table name.
+        # We can make this dynamic later if it varies per page.
+        source_table_full_name = "portdb_portfolio_ops" 
+        
+        # Extract Primary Keys and Foreign Keys as well from the text
+        primary_keys = []
+        foreign_keys = []
+        
+        # This part requires careful inspection of the storage format HTML for these specific lines.
+        # Assuming they are in paragraph tags or similar, we can search.
+        pk_tag = soup.find(lambda tag: tag.name in ['p', 'strong'] and "Primary Keys:" in tag.text)
+        if pk_tag:
+            pk_text = pk_tag.text.split("Primary Keys:")[1].strip()
+            primary_keys = [k.strip() for k in pk_text.split(',')]
+            
+        fk_tag = soup.find(lambda tag: tag.name in ['p', 'strong'] and "Foreign Keys:" in tag.text)
+        if fk_tag:
+            fk_text = fk_tag.text.split("Foreign Keys:")[1].strip()
+            foreign_keys = [k.strip() for k in fk_text.split(',')]
+
 
         # --- Extract Table Data ---
         tables = soup.find_all('table')
@@ -90,43 +105,42 @@ class ConfluencePageParser:
             print("No tables found on the Confluence page.")
             return None, None
 
-        # Assuming the first table is the one with column definitions
         target_table_html = tables[0]
 
+        # Extract headers from the table head
         headers = [th.text.strip() for th in target_table_html.find('thead').find_all('th')]
         
-        # We need specific headers: 'Source field name', 'Add Source To Target?', 'Target Field name'
+        # Define the headers we specifically need for SQL generation
         required_headers = [
-            'Source table', # Although it seems consistent, we should still extract it
+            'Source table',
             'Source field name', 
             'Add Source To Target?', 
             'Target Field name'
         ]
         
-        # Check if all required headers are present
         if not all(rh in headers for rh in required_headers):
             print(f"Missing one or more required headers in the table. Found: {headers}")
             print(f"Expected: {required_headers}")
             return None, None
 
-        # Get the indices of the required headers
         header_indices = {h: headers.index(h) for h in required_headers}
 
         extracted_rows = []
         for row in target_table_html.find('tbody').find_all('tr'):
             cols = row.find_all('td')
-            if len(cols) > 0: # Ensure it's not an empty row
+            if len(cols) > 0:
                 row_data = {}
                 for rh, idx in header_indices.items():
-                    # Handle potential missing columns if table structure is inconsistent
                     row_data[rh] = cols[idx].text.strip() if idx < len(cols) else ""
                 extracted_rows.append(row_data)
 
+        # Still need clarification on actual DB/Schema names for Snowflake
         table_metadata = {
-            "table_name": table_name if table_name else "portfolio_ops", # Default if not found
-            "database_name": "YOUR_SNOWFLAKE_DB", # Still needs clarification
-            "schema_name": "YOUR_SNOWFLAKE_SCHEMA", # Still needs clarification
-            "primary_keys": ["portfolio_id", "portfolio_tax_id"], # From observation, can be parsed
+            "table_name": table_name if table_name else "portfolio_ops",
+            "database_name": "YOUR_SNOWFLAKE_DB", 
+            "schema_name": "YOUR_SNOWFLAKE_SCHEMA", 
+            "primary_keys": primary_keys if primary_keys else ["portfolio_id", "portfolio_tax_id"], # Fallback
+            "foreign_keys": foreign_keys,
             "source_table_full_name": source_table_full_name
         }
 
@@ -134,7 +148,6 @@ class ConfluencePageParser:
 
 # Example usage (run this in your main script or a separate test)
 if __name__ == "__main__":
-    # Just a check to see if .env was loaded
     if os.getenv("CONFLUENCE_API_TOKEN"):
         print(".env file loaded successfully (Confluence API token found).")
     else:

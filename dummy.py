@@ -1,18 +1,25 @@
 import re
 import os
 
-def process_sql_script(sql_content):
+def process_sql_script_with_prefix(sql_content, num_files_to_create=2):
     """
-    Processes SQL content to create YAML files for each view definition.
+    Processes SQL content to create YAML files for view definitions,
+    adding a specific prefix and modifying author/id.
 
     Args:
         sql_content (str): The entire SQL script content as a string.
+        num_files_to_create (int): The maximum number of YAML files to create.
     """
     lines = sql_content.strip().split('\n')
-    output_dir = "view_yamls"
+    output_dir = "view_yamls_modified"
     os.makedirs(output_dir, exist_ok=True)
 
+    files_created = 0
+
     for line in lines:
+        if files_created >= num_files_to_create:
+            break # Stop after creating the desired number of files
+
         line = line.strip()
         if line.startswith("create or replace secure view"):
             # Regex to capture view name and source table name
@@ -37,22 +44,39 @@ def process_sql_script(sql_content):
                 yaml_filename = f"{view_name_suffix}.yaml"
                 yaml_filepath = os.path.join(output_dir, yaml_filename)
 
-                yaml_content = (
-                    f"view_name: {full_view_name}\n"
-                    f"source_table: {full_source_table_name}\n"
-                    "# Add other metadata as needed\n"
-                )
+                # --- NEW: Define the prefix YAML content ---
+                prefix_yaml_content = f"""
+databaseChangeLog:
+  - changeSet:
+      id: SV_{view_name_suffix}-view-1 # Modified ID
+      author: kvishwaj # Modified Author
+      runOnChange: true
+      changes:
+        - createView:
+            fullDefinition: true
+            remarks: ''
+            viewName: {view_name_suffix}
+            schemaName: INVESTMENTS
+            selectQuery: >
+"""
+                # --- END NEW ---
+
+                # Indent the selectQuery SQL to match the YAML structure
+                # The 'line' variable already contains the SQL string
+                indented_sql = f"              {line}\n"
+
+
+                yaml_content = prefix_yaml_content + indented_sql
 
                 try:
                     with open(yaml_filepath, 'w') as f:
-                        f.write(yaml_content)
+                        f.write(yaml_content.strip()) # .strip() to remove leading/trailing newlines from prefix
                     print(f"Created {yaml_filepath}")
+                    files_created += 1 # Increment counter only if file is created
                 except IOError as e:
                     print(f"Error writing file {yaml_filepath}: {e}")
             else:
                 print(f"Warning: Could not parse line (regex mismatch): {line}")
-        # else:
-        #     print(f"Skipping non-view definition line: {line}")
 
 # Example Usage:
 # Replace this multiline string with the actual content of your SQL file
@@ -99,8 +123,5 @@ create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_COUNTR
 create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_CLIENT_DEFINED_FIELD_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_CLIENT_DEFINED_FIELD_HIST;
 """
 
-# If your SQL script is in a file, you can read it like this:
-# with open('your_sql_script.sql', 'r') as f:
-#     sql_script_content = f.read()
-
-process_sql_script(sql_script_content)
+# Call the function with num_files_to_create set to 2
+process_sql_script_with_prefix(sql_script_content, num_files_to_create=2)

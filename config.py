@@ -1,43 +1,15 @@
-# .env - This file should NOT be committed to version control!
-
-# Confluence Credentials
-CONFLUENCE_BASE_URL=https://your-company.atlassian.net/wiki
-CONFLUENCE_USERNAME=your_confluence_username
-CONFLUENCE_API_TOKEN=your_confluence_personal_access_token
-CONFLUENCE_SPACE_KEY=YOURSPACE
-
-# Snowflake Credentials
-SNOWFLAKE_USER=your_snowflake_user
-SNOWFLAKE_PASSWORD=your_snowflake_password
-SNOWFLAKE_ACCOUNT=your_snowflake_account_identifier
-SNOWFLAKE_WAREHOUSE=your_snowflake_warehouse
-SNOWFLAKE_DATABASE=your_snowflake_database
-SNOWFLAKE_SCHEMA=your_snowflake_schema
-SNOWFLAKE_ROLE=your_snowflake_role
-
-# Git Credentials (Example)
-GIT_USERNAME=your_git_username
-GIT_API_TOKEN=your_git_pat
-
-
-
-
-
 # config.py
 
 import os
 from dotenv import load_dotenv
+import json
 
-# Load environment variables from a .env file if it exists
-# This is useful for local development to avoid setting environment variables
-# directly in your shell for every session.
 load_dotenv()
 
 class ConfluenceConfig:
     BASE_URL = os.getenv("CONFLUENCE_BASE_URL")
-    USERNAME = os.getenv("CONFLUENCE_USERNAME") # Often for basic auth or token owner
-    API_TOKEN = os.getenv("CONFLUENCE_API_TOKEN") # Personal Access Token
-    SPACE_KEY = os.getenv("CONFLUENCE_SPACE_KEY") # e.g., 'DEPT' or 'MYSPACE'
+    API_TOKEN = os.getenv("CONFLUENCE_API_TOKEN")
+    SPACE_KEY = os.getenv("CONFLUENCE_SPACE_KEY")
 
 class SnowflakeConfig:
     USER = os.getenv("SNOWFLAKE_USER")
@@ -48,16 +20,25 @@ class SnowflakeConfig:
     SCHEMA = os.getenv("SNOWFLAKE_SCHEMA")
     ROLE = os.getenv("SNOWFLAKE_ROLE")
 
-class GitConfig:
-    # Example for Git, could be GitHub/GitLab PAT
-    USERNAME = os.getenv("GIT_USERNAME")
-    API_TOKEN = os.getenv("GIT_API_TOKEN")
+# NEW: Configuration for input/output files
+class FilePaths:
+    TITLES_JSON_FILE = "titles.json" # Input: list of page titles
+    REPORT_JSON_FILE = "confluence_ingest_report.json" # Output: hit-or-miss report
+    TABLES_DIR = "tables" # Output directory for structured table data (used later)
 
-# Add other service configs as needed (Azure Repos, dbt, etc.)
-
-# Example: Centralized function to get a specific page title
-# We might enhance this to use page IDs or search later.
-def get_confluence_page_title():
-    # This could be stored in a more general config if many pages
-    # For now, let's keep it simple.
-    return "Table: portfolio_ops"
+def get_confluence_page_titles(json_file_path=FilePaths.TITLES_JSON_FILE):
+    """
+    Reads a list of Confluence page titles from a JSON file.
+    """
+    if not os.path.exists(json_file_path):
+        raise FileNotFoundError(f"Titles JSON file not found at: {json_file_path}")
+    try:
+        with open(json_file_path, 'r', encoding='utf-8') as f:
+            titles = json.load(f)
+            if not isinstance(titles, list):
+                raise ValueError("Titles JSON file must contain a list of strings.")
+            return titles
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Error decoding titles JSON file: {e}")
+    except Exception as e:
+        raise Exception(f"An unexpected error occurred reading titles file: {e}")

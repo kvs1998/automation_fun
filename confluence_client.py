@@ -1,36 +1,39 @@
-# confluence_client.py (changes only in save_structured_data_to_single_file)
+import re
+import unicodedata
+from bs4 import BeautifulSoup
 
-# ... (all existing code as you provided it, no other changes)
-
-def save_structured_data_to_single_file(structured_data, output_dir="tables"):
+def clean_text_from_html(element):
     """
-    Saves the full structured_data to a single JSON file.
-    The filename is derived from the extracted table_name metadata.
+    Accepts either BeautifulSoup element or plain string.
+    Extracts text, removes HTML entities, normalizes Unicode, and strips whitespace.
     """
-    if not structured_data:
-        print("No structured data to save.")
-        return
+    if element is None:
+        return ""
 
-    os.makedirs(output_dir, exist_ok=True)
+    # If it's a string, parse it as HTML; else assume it's a BS element
+    if isinstance(element, str):
+        soup = BeautifulSoup(element, "html.parser")
+        text = soup.get_text(separator=" ", strip=True)
+    else:
+        text = element.get_text(separator=" ", strip=True)
 
-    # Use table_name from metadata for the filename
-    table_name_raw = structured_data["metadata"].get("table_name", "untitled_table")
-    
-    # --- NEW IMPROVEMENT: Aggressively sanitize the filename ---
-    # Convert to lowercase, replace spaces with underscores.
-    # Then, remove any character that is not alphanumeric or an underscore.
-    table_name_for_file = table_name_raw.lower().replace(" ", "_")
-    
-    # Remove any characters that are NOT alphanumeric, underscore, or hyphen
-    # This specifically targets problem characters like ':' from "Table: Identifier"
-    # and other symbols that might be illegal in filenames.
-    import re # Add this import at the top of the file if not already present
-    table_name_for_file = re.sub(r'[^a-z0-9_.-]', '', table_name_for_file)
-    
-    filename = os.path.join(output_dir, f"{table_name_for_file}.json")
-    with open(filename, 'w', encoding='utf-8') as f:
-        json.dump(structured_data, f, indent=2, ensure_ascii=False)
-    print(f"Saved full page data to: {filename}")
+    # Map of replacements
+    replacements = {
+        u'\xa0': ' ',
+        '&nbsp;': ' ',
+        '\u2013': '-',
+        '\u2014': '-',
+        '\u2018': "'", '\u2019': "'",
+        '\u201c': '"', '\u201d': '"',
+        '\u2026': '...'
+    }
 
+    # Replace all in one go
+    pattern = re.compile("|".join(map(re.escape, replacements.keys())))
+    text = pattern.sub(lambda m: replacements[m.group(0)], text)
 
-# ... (rest of the example usage)
+    # Unicode normalize
+    text = unicodedata.normalize('NFKD', text).strip()
+
+    # Remove extra spaces
+    return " ".join(text.split())

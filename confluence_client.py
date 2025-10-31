@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 from config import ConfluenceConfig, get_confluence_page_title
 import os
 import json
+from datetime import datetime
 
 class ConfluencePageParser:
     def __init__(self):
@@ -18,6 +19,11 @@ class ConfluencePageParser:
                 "Please ensure CONFLUENCE_BASE_URL, CONFLUENCE_API_TOKEN, "
                 "and CONFLUENCE_SPACE_KEY are set in your environment variables or .env file."
             )
+        
+        # Confluence viewinfo page URL structure
+        # We need the page_id which we get from the content API
+        self.page_info_base_url = f"{self.base_url}/pages/viewinfo.action"
+
 
     def _get_page_id_by_title(self, title):
         search_url = f"{self.base_url}/rest/api/content"
@@ -28,7 +34,7 @@ class ConfluencePageParser:
         params = {
             "title": title,
             "spaceKey": self.space_key,
-            "expand": "body.storage",
+            "expand": "body.storage", # Request storage format content
             "limit": 1
         }
 
@@ -45,23 +51,108 @@ class ConfluencePageParser:
             print(f"Page '{title}' not found in space '{self.space_key}'.")
             return None, None
 
+    def _get_page_information_html(self, page_id):
+        """
+        Fetches the HTML content from the /pages/viewinfo.action page.
+        """
+        page_info_url = f"{self.page_info_base_url}?pageId={page_id}"
+        headers = {
+            "Accept": "text/html",
+            "Authorization": f"Bearer {self.api_token}" # Use Bearer token even for HTML pages if needed
+        }
+        print(f"Fetching page information from: {page_info_url}...")
+        response = requests.get(page_info_url, headers=headers)
+        response.raise_for_status()
+        return response.text
+
+    def _parse_page_information_html(self, html_content):
+        """
+        Parses the HTML from the page information page to extract metadata.
+        """
+        soup = BeautifulSoup(html_content, 'html.parser')
+        info = {}
+
+        # Look for the .table-section or similar wrapper that contains the info
+        # This part is highly dependent on the Confluence UI structure.
+        # Based on screenshot, it's typically a definition list (dl) or a table structure.
+        # Let's target the dl.
+        
+        # Find the main information panel, typically a div with class 'wiki-content' or similar
+        # or a direct table if the info is laid out that way.
+        # From screenshot, it looks like div with dl elements.
+        main_info_div = soup.find('div', class_='wiki-content') # or other more specific class
+        if not main_info_div:
+            # Fallback for simpler structure or if wiki-content isn't primary wrapper
+            main_info_div = soup 
+            
+        # Extract Title (can also be from content API, but good to cross-check)
+        title_tag = main_info_div.find('th', string='Title:')
+        if title_tag and title_tag.find_next_sibling('td'):
+            info['page_title_from_info_page'] = title_tag.find_next_sibling('td').get_text(strip=True)
+
+        # Extract Author
+        author_tag = main_info_div.find('th', string='Author:')
+        if author_tag and author_tag.find_next_sibling('td'):
+            info['page_author'] = author_tag.find_next_sibling('td').get_text(strip=True)
+
+        # Extract Last Changed By and Last Changed Date
+        last_changed_by_tag = main_info_div.find('th', string='Last Changed by:')
+        if last_changed_by_tag and last_changed_by_tag.find_next_sibling('td'):
+            td_content = last_changed_by_tag.find_next_sibling('td')
+            # The structure is 'Chris Lee Oct 28, 2025' or similar, separated by a line break often
+            parts = [s.strip() for s in td_content.stripped_strings if s.strip()]
+            if len(parts) >= 2:
+                info['page_last_changed_by'] = parts[0]
+                # Attempt to parse the date string
+                date_str = parts[1]
+                try:
+                    # Confluence dates can be 'Month Day, Year' (e.g., 'Oct 28, 2025')
+                    info['page_last_changed_date'] = datetime.strptime(date_str, '%b %d, %Y').isoformat() # ISO 8601 format
+                except ValueError:
+                    info['page_last_changed_date'] = date_str # Fallback to raw string
+
+        # Extract Parent Page from Hierarchy
+        parent_page_tag = main_info_div.find('span', class_='parent-page-item')
+        if parent_page_tag:
+            info['page_parent_page'] = parent_page_tag.get_text(strip=True)
+
+        return info
+
+
     def get_structured_data_from_page(self):
+        # First, get page ID and content (including page ID)
         page_id, page_content_html = self._get_page_id_by_title(self.page_title)
 
         if not page_id or not page_content_html:
             print("Could not retrieve page content. Exiting.")
             return None
 
+        # Now, fetch and parse the page information HTML
+        extra_page_info = {}
+        try:
+            page_info_html = self._get_page_information_html(page_id)
+            extra_page_info = self._parse_page_information_html(page_info_html)
+            print("Successfully extracted additional page information.")
+        except requests.exceptions.HTTPError as e:
+            print(f"Warning: Could not fetch page information for pageId {page_id}. HTTP Error: {e}")
+            print(f"Response content (if available): {e.response.text}")
+        except Exception as e:
+            print(f"Warning: Failed to parse page information HTML: {e}")
+        
+
         soup = BeautifulSoup(page_content_html, 'html.parser')
         
         structured_page_data = {
-            "page_title": self.page_title,
+            "page_title": self.page_title, # Main title from content API query
             "page_id": page_id,
             "metadata": {},
             "tables": []
         }
+        # Merge extra page info into metadata
+        structured_page_data["metadata"].update(extra_page_info)
 
-        # --- Extract Page-Level Metadata ---
+
+        # --- Extract Page-Level Metadata from content HTML ---
         def extract_text_metadata(soup_obj, label):
             tag = soup_obj.find(lambda t: t.name in ['p', 'div', 'h1', 'h2', 'h3'] and label in t.get_text(strip=True))
             if tag:
@@ -74,6 +165,7 @@ class ConfluencePageParser:
                     return value
             return None
 
+        # These are specific to the 'Table: portfolio_ops' content page layout
         structured_page_data["metadata"]["table_name"] = extract_text_metadata(soup, "Table name:")
         structured_page_data["metadata"]["schema_name"] = extract_text_metadata(soup, "Schema name:")
         structured_page_data["metadata"]["database_name"] = extract_text_metadata(soup, "Database name:")
@@ -107,7 +199,7 @@ class ConfluencePageParser:
         # --- Extract Table Data (Iterate through all tables) ---
         all_html_tables = soup.find_all('table')
         if not all_html_tables:
-            print("No tables found on the Confluence page.")
+            print("No tables found on the Confluence page content.")
             return structured_page_data
 
         for i, html_table in enumerate(all_html_tables):
@@ -140,19 +232,19 @@ class ConfluencePageParser:
                 print(f"Parsing table {table_id} with dynamic structure (dynamic_auxiliary).")
                 for h_raw in actual_headers_raw:
                     h_cleaned = h_raw.replace(' ', '_').replace('?', '').replace('-', '_').lower()
-                    current_table_headers_mapping_strategy[h_raw] = h_cleaned # Map raw header to cleaned key
+                    current_table_headers_mapping_strategy[h_raw] = h_cleaned
 
             parsed_table_data["table_type"] = table_type
 
             # Build header_indices for the current table's parsing logic
-            header_indices = {} # Maps standardized key to its column index
-            if i == 0: # For primary table, use the all_expected_primary_table_headers_map directly
+            header_indices = {}
+            if i == 0:
                 for original_header, standardized_key in all_expected_primary_table_headers_map.items():
                     try:
                         header_indices[standardized_key] = actual_headers_raw.index(original_header)
                     except ValueError:
                         header_indices[standardized_key] = -1
-            else: # For dynamic tables, map the cleaned header names to indices
+            else:
                 for col_idx, h_raw in enumerate(actual_headers_raw):
                     h_cleaned = h_raw.replace(' ', '_').replace('?', '').replace('-', '_').lower()
                     header_indices[h_cleaned] = col_idx
@@ -165,9 +257,6 @@ class ConfluencePageParser:
                     continue
                 
                 column_data = {}
-                # Iterate over the standardized keys from the chosen mapping strategy
-                # For primary table, use keys from all_expected_primary_table_headers_map
-                # For dynamic tables, use the keys generated dynamically (current_table_headers_mapping_strategy's values)
                 keys_to_process = list(current_table_headers_mapping_strategy.values())
                 
                 for standardized_key in keys_to_process:
@@ -185,11 +274,10 @@ class ConfluencePageParser:
                         else:
                             column_data[standardized_key] = ""
                 
-                # Filter for adding column data
-                if i == 0: # Primary table filter
+                if i == 0:
                     if column_data.get('source_field_name') or column_data.get('target_field_name'):
                         parsed_table_data["columns"].append(column_data)
-                else: # Dynamic tables, append if it has any meaningful data
+                else:
                     if any(v for k, v in column_data.items() if v not in ["", False, None]):
                          parsed_table_data["columns"].append(column_data)
 
@@ -231,11 +319,10 @@ if __name__ == "__main__":
 
         if structured_data:
             print("\n--- Successfully Extracted Structured Data ---")
-            print(json.dumps(structured_data, indent=2)) # Print to console
+            print(json.dumps(structured_data, indent=2))
 
-            save_structured_data_to_single_file(structured_data) # Save to a single file
+            save_structured_data_to_single_file(structured_data)
 
-            # --- Example: How you would use this data for SQL generation ---
             if structured_data["tables"]:
                 print("\n--- Columns for SQL Generation (from PRIMARY table with 'add_to_target=True') ---")
                 

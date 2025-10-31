@@ -5,10 +5,10 @@ from config import ConfluenceConfig, get_confluence_page_title
 import os
 import json
 from urllib.parse import quote
-import re
-from collections import deque
+import re # Needed for re.sub in clean_special_characters_iterative and filename sanitization
+from collections import deque # Needed for clean_special_characters_iterative
 
-# Your provided iterative cleaning function (minor adjustment for Latin-1 decoding robustness)
+# Your provided iterative cleaning function (placed at the top)
 def clean_special_characters_iterative(data):
     """
     Iteratively cleans special characters from strings in a nested structure.
@@ -23,15 +23,15 @@ def clean_special_characters_iterative(data):
         current = queue.popleft()
 
         if isinstance(current, dict):
-            for key, value in current.items():
+            # Iterate on a copy of items to allow modification during iteration
+            for key, value in list(current.items()): 
                 if isinstance(value, (dict, list)):
                     queue.append(value)
                 elif isinstance(value, str):
-                    # Robustly handle potential decoding errors
                     try:
                         decoded = value.encode('unicode_escape').decode('latin-1')
                     except UnicodeEncodeError:
-                        decoded = value # Fallback if encoding fails, use original value
+                        decoded = value
                     
                     cleaned = re.sub(r'[^\\x00-\\x7F]+', ' ', decoded) 
                     current[key] = re.sub(r'\s+', ' ', cleaned).strip()
@@ -45,26 +45,24 @@ def clean_special_characters_iterative(data):
                     try:
                         decoded = item.encode('unicode_escape').decode('latin-1')
                     except UnicodeEncodeError:
-                        decoded = item # Fallback
+                        decoded = item
                     cleaned = re.sub(r'[^\\x00-\\x7F]+', ' ', decoded)
                     current[i] = re.sub(r'\s+', ' ', cleaned).strip()
     return data
 
-# Simplified clean_text_from_html
-def clean_text_from_html(element):
+# This helper will now be very minimal, only doing basic get_text and initial nbsp -> space
+def clean_text_from_html_basic(element): # Renamed for clarity
     """
     Extracts text from a BeautifulSoup element, replaces non-breaking spaces
     with regular spaces, and strips whitespace.
+    Deep cleaning for non-ASCII chars is handled by clean_special_characters_iterative.
     """
     if element is None:
         return ""
     
     text = element.get_text(separator=" ", strip=True) 
-    
-    # Replace common non-breaking space characters with regular spaces
     text = text.replace(u'\xa0', u' ')
     text = text.replace('&nbsp;', ' ')
-
     return text.strip()
 
 
@@ -89,7 +87,13 @@ class ConfluencePageParser:
             "Authorization": f"Bearer {self.api_token}"
         }
         
-        encoded_title = quote(title, safe='') 
+        # --- Resilient Page Title Cleaning for API Search ---
+        # 1. Normalize spaces
+        cleaned_title_for_search = " ".join(title.split()).strip() 
+        # 2. Normalize space around colon (e.g., "Table : Title" -> "Table: Title")
+        cleaned_title_for_search = cleaned_title_for_search.replace(" : ", ": ").replace(":  ", ": ") 
+        # 3. URL-encode
+        encoded_title = quote(cleaned_title_for_search, safe='') 
         
         params = {
             "title": encoded_title, 
@@ -98,7 +102,7 @@ class ConfluencePageParser:
             "limit": 1
         }
 
-        print(f"Searching for page '{title}' in space '{self.space_key}'...")
+        print(f"Searching for page '{cleaned_title_for_search}' in space '{self.space_key}'...")
         response = requests.get(search_url, headers=headers, params=params)
         response.raise_for_status()
 
@@ -108,8 +112,9 @@ class ConfluencePageParser:
             print(f"Found page '{page.get('title', 'N/A')}' with ID: {page['id']}") 
             return page['id'], page['body']['storage']['value']
         else:
-            print(f"Page with title '{title}' not found in space '{self.space_key}'. "
-                  f"Please ensure the page title in config.py is exact and case-sensitive.")
+            print(f"Page with title '{cleaned_title_for_search}' not found in space '{self.space_key}'. "
+                  f"Please ensure the page title in config.py is exact and case-sensitive, "
+                  f"and that the space key '{self.space_key}' is correct.")
             return None, None
 
     def get_structured_data_from_page(self):
@@ -122,7 +127,7 @@ class ConfluencePageParser:
         soup = BeautifulSoup(page_content_html, 'html.parser')
         
         structured_page_data = {
-            "page_title": self.page_title,
+            "page_title": self.page_title, # This will be cleaned by the iterative cleaner later
             "page_id": page_id,
             "metadata": {},
             "tables": []
@@ -130,9 +135,10 @@ class ConfluencePageParser:
 
         # --- Extract Page-Level Metadata ---
         def extract_text_metadata(soup_obj, label):
-            tag = soup_obj.find(lambda t: t.name in ['p', 'div', 'h1', 'h2', 'h3'] and label in clean_text_from_html(t))
+            # Using basic cleaner here, as deep cleaner will run on entire structure
+            tag = soup_obj.find(lambda t: t.name in ['p', 'div', 'h1', 'h2', 'h3'] and label in clean_text_from_html_basic(t))
             if tag:
-                clean_full_text = clean_text_from_html(tag)
+                clean_full_text = clean_text_from_html_basic(tag)
                 parts = clean_full_text.split(label, 1)
                 if len(parts) > 1:
                     value = parts[1].strip()
@@ -190,9 +196,9 @@ class ConfluencePageParser:
                 continue
 
             header_cells = rows[0].find_all(['th', 'td'])
-            actual_headers_raw_cleaned = [clean_text_from_html(cell) for cell in header_cells]
+            # Use basic cleaner here, as deep cleaner will run on entire structure later
+            actual_headers_raw_cleaned = [clean_text_from_html_basic(cell) for cell in header_cells]
 
-            # Determine the header mapping strategy
             current_table_headers_mapping_strategy = {}
             table_type = ""
 
@@ -207,12 +213,10 @@ class ConfluencePageParser:
                 print(f"Parsing table {table_id} with dynamic structure (dynamic_auxiliary).")
                 for h_raw_cleaned in actual_headers_raw_cleaned:
                     h_cleaned_for_map = h_raw_cleaned.replace(' ', '_').replace('?', '').replace('-', '_').lower()
-                    # FIX: Store mapping from cleaned_raw header to standardized key
                     current_table_headers_mapping_strategy[h_raw_cleaned] = h_cleaned_for_map 
 
             parsed_table_data["table_type"] = table_type
 
-            # Build header_indices for the current table's parsing logic
             header_indices = {}
             if i == 0:
                 for original_header, standardized_key in all_expected_primary_table_headers_map.items():
@@ -220,7 +224,7 @@ class ConfluencePageParser:
                         header_indices[standardized_key] = actual_headers_raw_cleaned.index(original_header)
                     except ValueError:
                         header_indices[standardized_key] = -1
-            else: # FIX: For dynamic tables, map standardized key to its index
+            else:
                 for col_idx, h_raw_cleaned in enumerate(actual_headers_raw_cleaned):
                     h_standardized_key = h_raw_cleaned.replace(' ', '_').replace('?', '').replace('-', '_').lower()
                     header_indices[h_standardized_key] = col_idx
@@ -232,17 +236,12 @@ class ConfluencePageParser:
                     continue
                 
                 column_data = {}
+                keys_to_process = list(current_table_headers_mapping_strategy.values())
                 
-                # Determine which set of standardized keys to process
-                if i == 0:
-                    keys_to_process = list(all_expected_primary_table_headers_map.values())
-                else: # FIX: For dynamic tables, iterate over the standardized keys derived from current_table_headers_mapping_strategy values
-                    keys_to_process = [v for k, v in current_table_headers_mapping_strategy.items()]
-
                 for standardized_key in keys_to_process:
                     idx = header_indices.get(standardized_key, -1) 
                     if idx != -1 and idx < len(cols):
-                        value = clean_text_from_html(cols[idx])
+                        value = clean_text_from_html_basic(cols[idx]) # Using basic cleaner here
                         
                         if standardized_key in ['add_to_target', 'is_primary_key', 'deprecated']:
                             column_data[standardized_key] = (value.lower() == 'yes')
@@ -282,6 +281,7 @@ def save_structured_data_to_single_file(structured_data, output_dir="tables"):
     
     filename = os.path.join(output_dir, f"{table_name_for_file}.json")
     with open(filename, 'w', encoding='utf-8') as f:
+        # --- NEW: Apply the deep iterative cleaning here before saving ---
         cleaned_structured_data = clean_special_characters_iterative(structured_data)
         json.dump(cleaned_structured_data, f, indent=2, ensure_ascii=False)
     print(f"Saved full page data to: {filename}")
@@ -301,20 +301,16 @@ if __name__ == "__main__":
 
         if structured_data:
             print("\n--- Successfully Extracted Structured Data ---")
-            # print(json.dumps(structured_data, indent=2)) # No longer printing raw data
+            # Apply the iterative cleaner for display purposes to see the effect
+            display_data = clean_special_characters_iterative(json.loads(json.dumps(structured_data))) 
+            print(json.dumps(display_data, indent=2))
 
             save_structured_data_to_single_file(structured_data) # Save to a single file
 
-            # For console output, let's print the *cleaned* version
-            # (assuming primary_table_data will be clean after save_structured_data_to_single_file)
-            print("\n--- Displaying Cleaned & Filtered Data for SQL Generation ---")
+            print("\n--- Columns for SQL Generation (from PRIMARY table with 'add_to_target=True') ---")
             
-            # Deep copy and clean for display. This ensures console output is clean.
-            display_data = clean_special_characters_iterative(json.loads(json.dumps(structured_data))) 
-
+            # Work with the (now implicitly cleaned for display) data
             if display_data["tables"]:
-                print("\n--- Columns for SQL Generation (from PRIMARY table with 'add_to_target=True') ---")
-                
                 primary_table_data = next((t for t in display_data["tables"] if t.get("table_type") == "primary_definitions"), None)
 
                 if primary_table_data:

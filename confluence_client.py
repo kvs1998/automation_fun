@@ -93,6 +93,24 @@ class ConfluencePageParser:
             print("No tables found on the Confluence page.")
             return structured_page_data
 
+        # Define ALL expected headers and their standardized keys from your Confluence table
+        # Ordered as they appear in your screenshot for clarity in mapping
+        all_expected_headers_map = {
+            'Source table': 'source_table',
+            'Source field name': 'source_field_name', 
+            'Add Source To Target?': 'add_to_target', 
+            'Target Field name': 'target_field_name',
+            'Data type': 'data_type',
+            'Decode': 'decode',
+            'ADC Transformation': 'adc_transformation',
+            'Deprecated': 'deprecated',
+            'Primary Key': 'is_primary_key', # Renamed from 'primary_key' for clarity
+            'Definition': 'definition',
+            'proto file': 'proto_file',
+            'proto column name': 'proto_column_name',
+            'Comments': 'comments'
+        }
+
         for i, html_table in enumerate(all_html_tables):
             table_id = f"table_{i+1}"
             parsed_table_data = {
@@ -105,15 +123,21 @@ class ConfluencePageParser:
                 print(f"Table {table_id} has no rows. Skipping.")
                 continue
 
-            # Robust header extraction: Check for 'th' first, then default to 'td'
             header_cells = rows[0].find_all(['th', 'td'])
+            actual_headers = [cell.get_text(strip=True) for cell in header_cells]
+
+            # Build header_indices based on the ALL_EXPECTED_HEADERS_MAP
+            header_indices = {}
+            for original_header, standardized_key in all_expected_headers_map.items():
+                try:
+                    header_indices[standardized_key] = actual_headers.index(original_header)
+                except ValueError:
+                    header_indices[standardized_key] = -1 # Indicate that this specific header was not found
             
-            # Use a clean version of headers for dictionary keys (e.g., replace spaces, lowercase)
-            headers_raw = [cell.get_text(strip=True) for cell in header_cells]
-            headers_cleaned = [
-                h.replace(' ', '_').replace('?', '').replace('-', '_').lower() 
-                for h in headers_raw
-            ]
+            # Critical headers for this process
+            critical_headers = ['Source field name', 'Target Field name']
+            if not all(h in actual_headers for h in critical_headers):
+                 print(f"Warning: Table {table_id} is missing critical headers: {critical_headers}. Extracted headers: {actual_headers}. This table might not be suitable for SQL generation.")
 
             # Process data rows (skipping the header row)
             for row in rows[1:]:
@@ -122,17 +146,21 @@ class ConfluencePageParser:
                     continue
                 
                 column_data = {}
-                for col_idx, cell in enumerate(cols):
-                    if col_idx < len(headers_cleaned): # Ensure we have a corresponding header
-                        header_key = headers_cleaned[col_idx]
-                        value = cell.get_text(strip=True)
+                for standardized_key, idx in header_indices.items():
+                    if idx != -1 and idx < len(cols): # Check if header exists and column cell exists
+                        value = cols[idx].get_text(strip=True)
                         
-                        # Specific handling for boolean-like fields if they match expected names
-                        if header_key in ['add_source_to_target', 'primary_key', 'deprecated']:
-                            column_data[header_key] = (value.lower() == 'yes')
+                        # Type conversion for boolean-like fields
+                        if standardized_key in ['add_to_target', 'is_primary_key', 'deprecated']:
+                            column_data[standardized_key] = (value.lower() == 'yes')
                         else:
-                            column_data[header_key] = value
-                    # Else: ignore columns that don't have a corresponding header (shouldn't happen with well-formed tables)
+                            column_data[standardized_key] = value
+                    else:
+                        # Assign appropriate default values for missing columns
+                        if standardized_key in ['add_to_target', 'is_primary_key', 'deprecated']:
+                            column_data[standardized_key] = False
+                        else:
+                            column_data[standardized_key] = ""
                 
                 # Only add column data if it has at least a source or target field name to be meaningful
                 if column_data.get('source_field_name') or column_data.get('target_field_name'):
@@ -168,13 +196,13 @@ if __name__ == "__main__":
                 if first_column_source_table:
                     table_metadata['source_table_full_name'] = first_column_source_table
                 else:
-                    table_metadata['source_table_full_name'] = "UNKNOWN_SOURCE_TABLE" # Fallback if no source_table in columns
+                    table_metadata['source_table_full_name'] = "UNKNOWN_SOURCE_TABLE" # Fallback
 
-                print("\n--- Columns for SQL Generation (from first table with 'add_source_to_target=True') ---")
+                print("\n--- Columns for SQL Generation (from first table with 'add_to_target=True') ---")
                 
                 columns_to_select = [
                     col for col in main_table_data["columns"] 
-                    if col.get("add_source_to_target")
+                    if col.get("add_to_target")
                 ]
 
                 if columns_to_select:
@@ -182,12 +210,17 @@ if __name__ == "__main__":
                     print("Source Table (derived):", table_metadata.get("source_table_full_name"))
                     print("Selected Columns:")
                     for col in columns_to_select:
+                        # Print all extracted fields for the selected column to demonstrate
+                        # what's available for SQL generation or other uses
                         print(f"  - Source: {col.get('source_field_name')}, "
                               f"Target: {col.get('target_field_name')}, "
-                              f"Is PK in table: {col.get('primary_key')}, "
-                              f"Data Type: {col.get('data_type')}")
+                              f"Is PK: {col.get('is_primary_key')}, "
+                              f"Data Type: {col.get('data_type')}, "
+                              f"Decode: {col.get('decode')}, "
+                              f"Definition: {col.get('definition')}, "
+                              f"Comments: {col.get('comments')}")
                 else:
-                    print("No columns marked 'True' for 'add_source_to_target' in the first table.")
+                    print("No columns marked 'True' for 'add_to_target' in the first table.")
             else:
                 print("No tables found in the structured data.")
         else:

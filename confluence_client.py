@@ -4,33 +4,30 @@ from bs4 import BeautifulSoup
 from config import ConfluenceConfig, get_confluence_page_title
 import os
 import json
-from urllib.parse import quote # NEW: For URL encoding page titles
-import unicodedata # NEW: For Unicode normalization and cleaning
+from urllib.parse import quote
+import unicodedata # For Unicode normalization
 
-# NEW: Helper function for robust text cleaning from HTML elements
+# Helper function for cleaning text from BeautifulSoup elements
 def clean_text_from_html(element):
     """
-    Extracts text from a BeautifulSoup element, removes common HTML entities,
+    Extracts text from a BeautifulSoup element, removes HTML entities,
     normalizes Unicode, and strips whitespace.
     """
     if element is None:
         return ""
-    
-    # Get raw text, which generally handles many HTML entities
+    # Get raw text, which handles many HTML entities
     text = element.get_text(separator=" ", strip=True) 
     
-    # Replace non-breaking space (U+00A0) to regular space, and explicit entity
-    text = text.replace(u'\xa0', u' ') # Common non-breaking space character
-    text = text.replace('&nbsp;', ' ') # Explicit non-breaking space entity
-
-    # Replace other common problematic Unicode characters
+    # Replace non-breaking space (U+00A0) and other common problematic chars
+    text = text.replace(u'\xa0', u' ') # Non-breaking space to regular space
+    text = text.replace('&nbsp;', ' ') # Explicit entity replacement
     text = text.replace('\u2013', '-') # En dash to hyphen
     text = text.replace('\u2014', '-') # Em dash to hyphen
-    text = text.replace('\u2018', "'").replace('\u2019', "'") # Curly single quotes to straight
-    text = text.replace('\u201c', '"').replace('\u201d', '"') # Curly double quotes to straight
-    text = text.replace('\u2026', '...') # Ellipsis character
+    text = text.replace('\u2018', "'").replace('\u2019', "'") # Curly quotes to straight quotes
+    text = text.replace('\u201c', '"').replace('\u201d', '"') # Curly double quotes to straight double quotes
 
-    # Unicode normalization for compatibility decomposition (e.g., separate accents)
+    # Unicode normalization to handle various forms of characters (e.g., composed vs decomposed)
+    # NFKD ensures compatibility decomposition, separating accents, etc.
     text = unicodedata.normalize('NFKD', text).strip()
     
     return text
@@ -56,9 +53,8 @@ class ConfluencePageParser:
             "Authorization": f"Bearer {self.api_token}"
         }
         
-        # NEW: Explicitly URL-encode the title parameter
-        # safe='' ensures that spaces, colons, and virtually all other non-alphanumeric
-        # characters (except standard path separators if needed, but not here) are encoded.
+        # Explicitly URL-encode the title for the API request
+        # safe='' encodes virtually all non-alphanumeric characters, including spaces, colons, etc.
         encoded_title = quote(title, safe='') 
         
         params = {
@@ -75,14 +71,11 @@ class ConfluencePageParser:
         data = response.json()
         if data and data["results"]:
             page = data["results"][0]
-            # It's good practice to log the exact title Confluence returned from the API, 
-            # as it might have subtle differences from the requested title.
+            # Log the exact title Confluence returned, which might be slightly different from requested
             print(f"Found page '{page.get('title', 'N/A')}' with ID: {page['id']}") 
             return page['id'], page['body']['storage']['value']
         else:
-            # NEW: More specific message if page not found
-            print(f"Page with title '{title}' not found in space '{self.space_key}'. "
-                  f"Please ensure the page title in config.py is exact and case-sensitive.")
+            print(f"Page with title '{title}' not found in space '{self.space_key}'.")
             return None, None
 
     def get_structured_data_from_page(self):
@@ -103,10 +96,10 @@ class ConfluencePageParser:
 
         # --- Extract Page-Level Metadata ---
         def extract_text_metadata(soup_obj, label):
-            # NEW: Use clean_text_from_html when searching within element text
+            # Use clean_text_from_html for the text to search within
             tag = soup_obj.find(lambda t: t.name in ['p', 'div', 'h1', 'h2', 'h3'] and label in clean_text_from_html(t))
             if tag:
-                # NEW: Use clean_text_from_html to get the element's full text
+                # Get the full clean text from the element
                 clean_full_text = clean_text_from_html(tag)
                 parts = clean_full_text.split(label, 1)
                 if len(parts) > 1:
@@ -165,7 +158,7 @@ class ConfluencePageParser:
                 continue
 
             header_cells = rows[0].find_all(['th', 'td'])
-            # NEW: Apply cleaning to raw headers immediately after extraction
+            # Apply cleaning to raw headers immediately
             actual_headers_raw_cleaned = [clean_text_from_html(cell) for cell in header_cells]
 
             # Determine the header mapping strategy
@@ -181,8 +174,7 @@ class ConfluencePageParser:
             else: # Subsequent tables: Dynamically generate map
                 table_type = "dynamic_auxiliary"
                 print(f"Parsing table {table_id} with dynamic structure (dynamic_auxiliary).")
-                for h_raw_cleaned in actual_headers_raw_cleaned: # Already cleaned header string
-                    # NEW: Clean string for map key, ensuring consistency
+                for h_raw_cleaned in actual_headers_raw_cleaned: # Already cleaned
                     h_cleaned_for_map = h_raw_cleaned.replace(' ', '_').replace('?', '').replace('-', '_').lower()
                     current_table_headers_mapping_strategy[h_raw_cleaned] = h_cleaned_for_map # Map original cleaned header to standardized key
 
@@ -217,7 +209,7 @@ class ConfluencePageParser:
                 for standardized_key in keys_to_process:
                     idx = header_indices.get(standardized_key, -1) 
                     if idx != -1 and idx < len(cols):
-                        value = clean_text_from_html(cols[idx]) # NEW: Apply cleaning to cell content
+                        value = clean_text_from_html(cols[idx]) # Apply cleaning to cell content
                         
                         if standardized_key in ['add_to_target', 'is_primary_key', 'deprecated']:
                             column_data[standardized_key] = (value.lower() == 'yes')

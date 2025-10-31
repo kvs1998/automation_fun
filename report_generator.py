@@ -3,7 +3,7 @@ import os
 import json
 from datetime import datetime
 from config import ConfluenceConfig, FilePaths, get_confluence_page_titles
-from confluence_utils import ConfluencePageParser, clean_special_characters_iterative # Only ConfluencePageParser used now
+from confluence_utils import ConfluencePageParser, clean_special_characters_iterative
 
 
 def generate_hit_or_miss_report():
@@ -13,7 +13,7 @@ def generate_hit_or_miss_report():
     """
     print("--- Starting Confluence Hit-or-Miss Report Generation ---")
 
-    # Ensure output directory for reports exists (using TABLES_DIR for consistency, though no tables are saved yet)
+    # Ensure output directory for reports exists
     os.makedirs(FilePaths.TABLES_DIR, exist_ok=True)
     report_file_path = os.path.join(FilePaths.TABLES_DIR, FilePaths.REPORT_JSON_FILE)
 
@@ -22,7 +22,6 @@ def generate_hit_or_miss_report():
     if os.path.exists(report_file_path):
         try:
             with open(report_file_path, 'r', encoding='utf-8') as f:
-                # Ensure the loaded report is a list, or initialize empty
                 loaded_report = json.load(f)
                 if isinstance(loaded_report, list):
                     existing_report_map = {item['given_title']: item for item in loaded_report}
@@ -51,23 +50,22 @@ def generate_hit_or_miss_report():
     for title in titles_to_process:
         report_entry = existing_report_map.get(title, {
             "given_title": title,
-            "status": "PENDING", # Initial status
+            "status": "PENDING",
             "found_title": None,
             "page_id": None,
             "notes": "",
-            "first_checked_on": None, # Will set this on first check
+            "first_checked_on": None,
             "last_checked_on": None,
-            "user_verified": False # NEW: Field for user review
+            "user_verified": False,
+            "attempts_made": 0 
         })
         
         current_timestamp = datetime.now().isoformat()
 
-        # Update first_checked_on if this is a new entry or it was previously None
         if report_entry["first_checked_on"] is None:
             report_entry["first_checked_on"] = current_timestamp
         report_entry["last_checked_on"] = current_timestamp
 
-        # Skip processing if already verified as a HIT
         if report_entry["status"] == "HIT" and report_entry["user_verified"]:
             print(f"Skipping '{title}' as it was previously a HIT and user_verified.")
             current_report_entries.append(report_entry)
@@ -75,22 +73,23 @@ def generate_hit_or_miss_report():
         
         print(f"\n--- Checking page: '{title}' ---")
         try:
-            # Call find_page_by_title (it does not return content_html now)
             search_result = parser.find_page_by_title(title)
 
             report_entry["status"] = search_result["status"]
             report_entry["found_title"] = search_result.get("found_title")
             report_entry["page_id"] = search_result.get("page_id")
             report_entry["notes"] = search_result.get("notes", "")
+            report_entry["attempts_made"] = search_result.get("attempts_made", 0)
             
             if search_result["status"] == "HIT":
-                print(f"Page '{search_result['found_title']}' found. Page ID: {search_result['page_id']}.")
+                print(f"Page '{search_result['found_title']}' found. Page ID: {search_result['page_id']}. Attempts: {report_entry['attempts_made']}.")
             else:
-                print(f"Page '{title}' NOT found. Status: {search_result['status']}.")
+                print(f"Page '{title}' NOT found. Status: {search_result['status']}. Attempts: {report_entry['attempts_made']}.")
 
         except Exception as e:
             report_entry["status"] = "ERROR"
             report_entry["notes"] = f"Error during Confluence check: {e}"
+            report_entry["attempts_made"] = 0 
             print(f"ERROR checking '{title}': {e}")
         
         current_report_entries.append(report_entry)

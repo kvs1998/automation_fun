@@ -87,15 +87,8 @@ class ConfluencePageParser:
         if not structured_page_data["metadata"].get("table_name"):
              structured_page_data["metadata"]["table_name"] = self.page_title.replace("Table: ", "").strip()
         
-        # --- Extract Table Data (Iterate through all tables) ---
-        all_html_tables = soup.find_all('table')
-        if not all_html_tables:
-            print("No tables found on the Confluence page.")
-            return structured_page_data
-
-        # Define ALL expected headers and their standardized keys from your Confluence table
-        # Ordered as they appear in your screenshot for clarity in mapping
-        all_expected_headers_map = {
+        # Define ALL expected headers and their standardized keys for the *primary* table structure
+        all_expected_primary_table_headers_map = {
             'Source table': 'source_table',
             'Source field name': 'source_field_name', 
             'Add Source To Target?': 'add_to_target', 
@@ -104,12 +97,18 @@ class ConfluencePageParser:
             'Decode': 'decode',
             'ADC Transformation': 'adc_transformation',
             'Deprecated': 'deprecated',
-            'Primary Key': 'is_primary_key', # Renamed from 'primary_key' for clarity
+            'Primary Key': 'is_primary_key', 
             'Definition': 'definition',
             'proto file': 'proto_file',
             'proto column name': 'proto_column_name',
             'Comments': 'comments'
         }
+
+        # --- Extract Table Data (Iterate through all tables) ---
+        all_html_tables = soup.find_all('table')
+        if not all_html_tables:
+            print("No tables found on the Confluence page.")
+            return structured_page_data
 
         for i, html_table in enumerate(all_html_tables):
             table_id = f"table_{i+1}"
@@ -124,20 +123,38 @@ class ConfluencePageParser:
                 continue
 
             header_cells = rows[0].find_all(['th', 'td'])
-            actual_headers = [cell.get_text(strip=True) for cell in header_cells]
+            actual_headers_raw = [cell.get_text(strip=True) for cell in header_cells]
 
-            # Build header_indices based on the ALL_EXPECTED_HEADERS_MAP
+            current_table_headers_map = {}
+            table_type = ""
+
+            if i == 0: # This is the first table, use the predefined map
+                table_type = "primary_definitions"
+                current_table_headers_map = all_expected_primary_table_headers_map
+                print(f"Parsing table {table_id} with predefined structure (primary_definitions).")
+            else: # Subsequent tables, parse headers dynamically
+                table_type = "dynamic_auxiliary"
+                print(f"Parsing table {table_id} with dynamic structure (dynamic_auxiliary).")
+                for h_raw in actual_headers_raw:
+                    # Clean headers for dynamic tables: lowercase, replace spaces/special with underscore
+                    h_cleaned = h_raw.replace(' ', '_').replace('?', '').replace('-', '_').lower()
+                    current_table_headers_map[h_raw] = h_cleaned # Map raw header to cleaned key
+
+            parsed_table_data["table_type"] = table_type
+
+            # Build header_indices for the current table's parsing logic
             header_indices = {}
-            for original_header, standardized_key in all_expected_headers_map.items():
+            for original_header, standardized_key in current_table_headers_map.items():
                 try:
-                    header_indices[standardized_key] = actual_headers.index(original_header)
+                    # For dynamic tables, original_header is the actual_headers_raw entry
+                    # For primary tables, original_header is the key from all_expected_primary_table_headers_map
+                    idx = actual_headers_raw.index(original_header if i == 0 else h_raw) # Re-find index
+                    if i > 0: # For dynamic tables, we rely on the cleaned name as the key in header_indices
+                        header_indices[standardized_key] = idx
+                    else: # For primary table, use the standardized key as defined in map
+                        header_indices[standardized_key] = idx
                 except ValueError:
-                    header_indices[standardized_key] = -1 # Indicate that this specific header was not found
-            
-            # Critical headers for this process
-            critical_headers = ['Source field name', 'Target Field name']
-            if not all(h in actual_headers for h in critical_headers):
-                 print(f"Warning: Table {table_id} is missing critical headers: {critical_headers}. Extracted headers: {actual_headers}. This table might not be suitable for SQL generation.")
+                    header_indices[standardized_key] = -1
 
             # Process data rows (skipping the header row)
             for row in rows[1:]:
@@ -146,8 +163,12 @@ class ConfluencePageParser:
                     continue
                 
                 column_data = {}
-                for standardized_key, idx in header_indices.items():
-                    if idx != -1 and idx < len(cols): # Check if header exists and column cell exists
+                # Determine which map to iterate for keys: predefined or dynamically generated
+                keys_to_process = all_expected_primary_table_headers_map.values() if i == 0 else current_table_headers_map.values()
+                
+                for standardized_key in keys_to_process:
+                    idx = header_indices.get(standardized_key, -1) # Get index for this standardized key
+                    if idx != -1 and idx < len(cols):
                         value = cols[idx].get_text(strip=True)
                         
                         # Type conversion for boolean-like fields
@@ -162,13 +183,46 @@ class ConfluencePageParser:
                         else:
                             column_data[standardized_key] = ""
                 
-                # Only add column data if it has at least a source or target field name to be meaningful
-                if column_data.get('source_field_name') or column_data.get('target_field_name'):
-                    parsed_table_data["columns"].append(column_data)
-            
+                # Only add column data if it has at least a source or target field name for the primary table,
+                # or if it's not empty for dynamic tables.
+                if i == 0: # Primary table filter
+                    if column_data.get('source_field_name') or column_data.get('target_field_name'):
+                        parsed_table_data["columns"].append(column_data)
+                else: # Dynamic tables, append if it has any meaningful data (not all empty strings/falses)
+                    if any(v for k, v in column_data.items() if v not in ["", False, None]):
+                         parsed_table_data["columns"].append(column_data)
+
             structured_page_data["tables"].append(parsed_table_data)
             
         return structured_page_data
+
+def save_structured_data_to_files(structured_data, output_dir="tables"):
+    """
+    Saves the full structured_data and individual table data to JSON files.
+    """
+    if not structured_data:
+        print("No structured data to save.")
+        return
+
+    # Ensure the output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+
+    page_title_sanitized = structured_data["page_title"].replace(" ", "_").replace(":", "").lower()
+    
+    # Save the full page data
+    full_page_filename = os.path.join(output_dir, f"{page_title_sanitized}_full_page_data.json")
+    with open(full_page_filename, 'w', encoding='utf-8') as f:
+        json.dump(structured_data, f, indent=2, ensure_ascii=False)
+    print(f"Saved full page data to: {full_page_filename}")
+
+    # Save each table's columns data separately
+    for table_data in structured_data["tables"]:
+        table_filename = os.path.join(output_dir, f"{page_title_sanitized}_{table_data['id']}_columns.json")
+        with open(table_filename, 'w', encoding='utf-8') as f:
+            # We save the entire table_data dictionary, which includes 'id' and 'table_type'
+            json.dump(table_data, f, indent=2, ensure_ascii=False)
+        print(f"Saved {table_data['id']} columns to: {table_filename}")
+
 
 # Example usage
 if __name__ == "__main__":
@@ -184,43 +238,44 @@ if __name__ == "__main__":
 
         if structured_data:
             print("\n--- Successfully Extracted Structured Data ---")
-            print(json.dumps(structured_data, indent=2))
+            print(json.dumps(structured_data, indent=2)) # Print to console
 
+            save_structured_data_to_files(structured_data) # Save to files
+
+            # --- Example: How you would use this data for SQL generation ---
             if structured_data["tables"]:
-                # Assuming the first table is the main one for SQL generation
-                main_table_data = structured_data["tables"][0] 
-                table_metadata = structured_data["metadata"]
+                print("\n--- Columns for SQL Generation (from PRIMARY table with 'add_to_target=True') ---")
                 
-                # Try to dynamically set source_table_full_name if it wasn't caught in page metadata
-                first_column_source_table = next((c.get('source_table') for c in main_table_data['columns'] if c.get('source_table')), None)
-                if first_column_source_table:
-                    table_metadata['source_table_full_name'] = first_column_source_table
-                else:
-                    table_metadata['source_table_full_name'] = "UNKNOWN_SOURCE_TABLE" # Fallback
+                # Find the primary table
+                primary_table_data = next((t for t in structured_data["tables"] if t.get("table_type") == "primary_definitions"), None)
 
-                print("\n--- Columns for SQL Generation (from first table with 'add_to_target=True') ---")
-                
-                columns_to_select = [
-                    col for col in main_table_data["columns"] 
-                    if col.get("add_to_target")
-                ]
+                if primary_table_data:
+                    table_metadata = structured_data["metadata"]
+                    
+                    first_column_source_table = next((c.get('source_table') for c in primary_table_data['columns'] if c.get('source_table')), None)
+                    if first_column_source_table:
+                        table_metadata['source_table_full_name'] = first_column_source_table
+                    else:
+                        table_metadata['source_table_full_name'] = "UNKNOWN_SOURCE_TABLE"
 
-                if columns_to_select:
-                    print("Table Name (from page metadata):", table_metadata.get("table_name"))
-                    print("Source Table (derived):", table_metadata.get("source_table_full_name"))
-                    print("Selected Columns:")
-                    for col in columns_to_select:
-                        # Print all extracted fields for the selected column to demonstrate
-                        # what's available for SQL generation or other uses
-                        print(f"  - Source: {col.get('source_field_name')}, "
-                              f"Target: {col.get('target_field_name')}, "
-                              f"Is PK: {col.get('is_primary_key')}, "
-                              f"Data Type: {col.get('data_type')}, "
-                              f"Decode: {col.get('decode')}, "
-                              f"Definition: {col.get('definition')}, "
-                              f"Comments: {col.get('comments')}")
+                    columns_to_select = [
+                        col for col in primary_table_data["columns"] 
+                        if col.get("add_to_target")
+                    ]
+
+                    if columns_to_select:
+                        print("Table Name (from page metadata):", table_metadata.get("table_name"))
+                        print("Source Table (derived):", table_metadata.get("source_table_full_name"))
+                        print("Selected Columns:")
+                        for col in columns_to_select:
+                            print(f"  - Source: {col.get('source_field_name')}, "
+                                  f"Target: {col.get('target_field_name')}, "
+                                  f"Is PK: {col.get('is_primary_key')}, "
+                                  f"Data Type: {col.get('data_type')}")
+                    else:
+                        print("No columns marked 'True' for 'add_to_target' in the primary table.")
                 else:
-                    print("No columns marked 'True' for 'add_to_target' in the first table.")
+                    print("No primary_definitions table found for SQL generation.")
             else:
                 print("No tables found in the structured data.")
         else:

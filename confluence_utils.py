@@ -48,7 +48,7 @@ def clean_special_characters_iterative(data):
                     current[i] = re.sub(r'\s+', ' ', cleaned).strip()
     return data
 
-# Basic HTML text cleaner (still useful if any parsing needed here, but kept minimal)
+# Basic HTML text cleaner
 def clean_text_from_html_basic(element):
     """
     Extracts text from a BeautifulSoup element, replaces non-breaking spaces
@@ -66,11 +66,10 @@ def clean_text_from_html_basic(element):
 class ConfluencePageParser:
     MAX_TITLE_SEARCH_RETRIES = 5
 
-    def __init__(self, base_url, api_token, space_key): # page_title removed from __init__
+    def __init__(self, base_url, api_token, space_key):
         self.base_url = base_url
         self.api_token = api_token
         self.space_key = space_key
-        # self.page_title is no longer stored here as it's passed to find_page_by_title
         
         if not all([self.base_url, self.api_token, self.space_key]):
             raise ValueError(
@@ -78,7 +77,6 @@ class ConfluencePageParser:
                 "Please ensure base_url, api_token, and space_key are provided."
             )
 
-    # find_page_by_title modified to NOT expand body.storage and NOT return content_html
     def find_page_by_title(self, title): 
         search_url = f"{self.base_url}/rest/api/content"
         headers = {
@@ -111,9 +109,19 @@ class ConfluencePageParser:
 
         tried_titles = set()
         
+        attempts_made = 0 
+
         for attempt_num, current_title_variant in enumerate(generate_title_variations(title)):
-            if attempt_num >= self.MAX_TITLE_SEARCH_RETRIES:
-                return {"status": "MISS", "found_title": None, "page_id": None, "notes": f"Reached max retries ({self.MAX_TITLE_SEARCH_RETRIES}) for title variations."}
+            attempts_made = attempt_num + 1
+
+            if attempts_made > self.MAX_TITLE_SEARCH_RETRIES:
+                return {
+                    "status": "MISS", 
+                    "found_title": None, 
+                    "page_id": None, 
+                    "notes": f"Reached max retries ({self.MAX_TITLE_SEARCH_RETRIES}) for title variations.",
+                    "attempts_made": attempts_made - 1
+                }
 
             if current_title_variant in tried_titles:
                 continue
@@ -122,11 +130,10 @@ class ConfluencePageParser:
             params = {
                 "title": current_title_variant,
                 "spaceKey": self.space_key,
-                # REMOVED: "expand": "body.storage", # No longer fetching content at this stage
                 "limit": 1
             }
 
-            print(f"Attempt {attempt_num + 1}/{self.MAX_TITLE_SEARCH_RETRIES}: Searching for page '{current_title_variant}'...")
+            print(f"Attempt {attempts_made}/{self.MAX_TITLE_SEARCH_RETRIES}: Searching for page '{current_title_variant}'...")
             try:
                 response = requests.get(search_url, headers=headers, params=params)
                 response.raise_for_status()
@@ -135,13 +142,13 @@ class ConfluencePageParser:
                 if data and data["results"]:
                     page = data["results"][0]
                     found_title = page.get('title', current_title_variant)
-                    print(f"SUCCESS: Found page '{found_title}' with ID: {page['id']} (attempt {attempt_num + 1}).") 
+                    print(f"SUCCESS: Found page '{found_title}' with ID: {page['id']} (attempt {attempts_made}).") 
                     return {
                         "status": "HIT",
                         "found_title": found_title,
                         "page_id": page['id'],
-                        # REMOVED: "content_html": page['body']['storage']['value'], 
-                        "notes": f"Matched using variation: '{current_title_variant}'"
+                        "notes": f"Matched using variation: '{current_title_variant}'",
+                        "attempts_made": attempts_made
                     }
             except requests.exceptions.HTTPError as e:
                 if e.response.status_code == 404:
@@ -152,6 +159,10 @@ class ConfluencePageParser:
             except Exception as e:
                 print(f"ERROR: An unexpected error occurred during API call for '{current_title_variant}': {e}. Trying next variation.")
 
-        return {"status": "MISS", "found_title": None, "page_id": None, "notes": f"Page not found after all {attempt_num + 1} variations."}
-
-    # REMOVED: get_structured_data_from_html for now, it will be in a later module
+        return {
+            "status": "MISS", 
+            "found_title": None, 
+            "page_id": None, 
+            "notes": f"Page not found after all {attempts_made} variations.",
+            "attempts_made": attempts_made
+        }

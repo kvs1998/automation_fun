@@ -4,6 +4,36 @@ from bs4 import BeautifulSoup
 from config import ConfluenceConfig, get_confluence_page_title
 import os
 import json
+from urllib.parse import quote  # NEW: For URL encoding page titles
+import unicodedata  # NEW: For Unicode normalization and cleaning
+
+# NEW: Helper function for robust text cleaning from HTML elements
+def clean_text_from_html(element):
+    """
+    Extracts text from a BeautifulSoup element, removes common HTML entities,
+    normalizes Unicode, and strips whitespace.
+    """
+    if element is None:
+        return ""
+    
+    # Get raw text, which generally handles many HTML entities
+    text = element.get_text(separator=" ", strip=True) 
+    
+    # Replace non-breaking space (U+00A0) to regular space, and explicit entity
+    text = text.replace(u'\xa0', u' ') # Common non-breaking space character
+    text = text.replace('&nbsp;', ' ') # Explicit non-breaking space entity
+
+    # Replace other common problematic Unicode characters
+    text = text.replace('\u2013', '-') # En dash to hyphen
+    text = text.replace('\u2014', '-') # Em dash to hyphen
+    text = text.replace('\u2018', "'").replace('\u2019', "'") # Curly single quotes to straight
+    text = text.replace('\u201c', '"').replace('\u201d', '"') # Curly double quotes to straight
+    text = text.replace('\u2026', '...') # Ellipsis character
+
+    # Unicode normalization for compatibility decomposition (e.g., separate accents)
+    text = unicodedata.normalize('NFKD', text).strip()
+    
+    return text
 
 class ConfluencePageParser:
     def __init__(self):
@@ -25,8 +55,14 @@ class ConfluencePageParser:
             "Accept": "application/json",
             "Authorization": f"Bearer {self.api_token}"
         }
+        
+        # NEW: Explicitly URL-encode the title parameter
+        # safe='' ensures that spaces, colons, and virtually all other non-alphanumeric
+        # characters (except standard path separators if needed, but not here) are encoded.
+        encoded_title = quote(title, safe='') 
+        
         params = {
-            "title": title,
+            "title": encoded_title, 
             "spaceKey": self.space_key,
             "expand": "body.storage",
             "limit": 1
@@ -39,10 +75,14 @@ class ConfluencePageParser:
         data = response.json()
         if data and data["results"]:
             page = data["results"][0]
-            print(f"Found page '{page['title']}' with ID: {page['id']}")
+            # It's good practice to log the exact title Confluence returned from the API, 
+            # as it might have subtle differences from the requested title.
+            print(f"Found page '{page.get('title', 'N/A')}' with ID: {page['id']}") 
             return page['id'], page['body']['storage']['value']
         else:
-            print(f"Page '{title}' not found in space '{self.space_key}'.")
+            # NEW: More specific message if page not found
+            print(f"Page with title '{title}' not found in space '{self.space_key}'. "
+                  f"Please ensure the page title in config.py is exact and case-sensitive.")
             return None, None
 
     def get_structured_data_from_page(self):
@@ -63,10 +103,12 @@ class ConfluencePageParser:
 
         # --- Extract Page-Level Metadata ---
         def extract_text_metadata(soup_obj, label):
-            tag = soup_obj.find(lambda t: t.name in ['p', 'div', 'h1', 'h2', 'h3'] and label in t.get_text(strip=True))
+            # NEW: Use clean_text_from_html when searching within element text
+            tag = soup_obj.find(lambda t: t.name in ['p', 'div', 'h1', 'h2', 'h3'] and label in clean_text_from_html(t))
             if tag:
-                clean_text = ' '.join(tag.stripped_strings)
-                parts = clean_text.split(label, 1)
+                # NEW: Use clean_text_from_html to get the element's full text
+                clean_full_text = clean_text_from_html(tag)
+                parts = clean_full_text.split(label, 1)
                 if len(parts) > 1:
                     value = parts[1].strip()
                     if label == "Database name:" and "Historization: SCD-2" in value:
@@ -123,7 +165,8 @@ class ConfluencePageParser:
                 continue
 
             header_cells = rows[0].find_all(['th', 'td'])
-            actual_headers_raw = [cell.get_text(strip=True) for cell in header_cells]
+            # NEW: Apply cleaning to raw headers immediately after extraction
+            actual_headers_raw_cleaned = [clean_text_from_html(cell) for cell in header_cells]
 
             # Determine the header mapping strategy
             current_table_headers_mapping_strategy = {}
@@ -138,24 +181,26 @@ class ConfluencePageParser:
             else: # Subsequent tables: Dynamically generate map
                 table_type = "dynamic_auxiliary"
                 print(f"Parsing table {table_id} with dynamic structure (dynamic_auxiliary).")
-                for h_raw in actual_headers_raw:
-                    h_cleaned = h_raw.replace(' ', '_').replace('?', '').replace('-', '_').lower()
-                    current_table_headers_mapping_strategy[h_raw] = h_cleaned # Map raw header to cleaned key
+                for h_raw_cleaned in actual_headers_raw_cleaned: # Already cleaned string
+                    # NEW: Clean string for map key, ensuring consistency
+                    h_cleaned_for_map = h_raw_cleaned.replace(' ', '_').replace('?', '').replace('-', '_').lower()
+                    current_table_headers_mapping_strategy[h_raw_cleaned] = h_cleaned_for_map # Map original cleaned header to standardized key
 
             parsed_table_data["table_type"] = table_type
 
             # Build header_indices for the current table's parsing logic
             header_indices = {} # Maps standardized key to its column index
-            if i == 0: # For primary table, use the all_expected_primary_table_headers_map directly
+            if i == 0: # For primary table, match expected original headers to their index in the cleaned actual headers
                 for original_header, standardized_key in all_expected_primary_table_headers_map.items():
                     try:
-                        header_indices[standardized_key] = actual_headers_raw.index(original_header)
+                        # Original header (e.g., 'Source table') matched against the cleaned actual headers
+                        header_indices[standardized_key] = actual_headers_raw_cleaned.index(original_header)
                     except ValueError:
                         header_indices[standardized_key] = -1
-            else: # For dynamic tables, map the cleaned header names to indices
-                for col_idx, h_raw in enumerate(actual_headers_raw):
-                    h_cleaned = h_raw.replace(' ', '_').replace('?', '').replace('-', '_').lower()
-                    header_indices[h_cleaned] = col_idx
+            else: # For dynamic tables, map the standardized (cleaned and formatted) header names to indices
+                for col_idx, h_raw_cleaned in enumerate(actual_headers_raw_cleaned): # Iterate over already cleaned headers
+                    h_cleaned_for_map = h_raw_cleaned.replace(' ', '_').replace('?', '').replace('-', '_').lower()
+                    header_indices[h_cleaned_for_map] = col_idx
 
 
             # Process data rows (skipping the header row)
@@ -165,15 +210,15 @@ class ConfluencePageParser:
                     continue
                 
                 column_data = {}
-                # Iterate over the standardized keys from the chosen mapping strategy
-                # For primary table, use keys from all_expected_primary_table_headers_map
-                # For dynamic tables, use the keys generated dynamically (current_table_headers_mapping_strategy's values)
+                # Determine which set of standardized keys to process
+                # For primary table, these come from all_expected_primary_table_headers_map's values
+                # For dynamic tables, these are the values (cleaned keys) from current_table_headers_mapping_strategy
                 keys_to_process = list(current_table_headers_mapping_strategy.values())
                 
                 for standardized_key in keys_to_process:
                     idx = header_indices.get(standardized_key, -1) 
                     if idx != -1 and idx < len(cols):
-                        value = cols[idx].get_text(strip=True)
+                        value = clean_text_from_html(cols[idx]) # NEW: Apply cleaning to cell content
                         
                         if standardized_key in ['add_to_target', 'is_primary_key', 'deprecated']:
                             column_data[standardized_key] = (value.lower() == 'yes')

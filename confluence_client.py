@@ -5,10 +5,11 @@ from config import ConfluenceConfig, get_confluence_page_title
 import os
 import json
 from urllib.parse import quote
-import re # Needed for re.sub in clean_special_characters_iterative and filename sanitization
-from collections import deque # Needed for clean_special_characters_iterative
+import re 
+from collections import deque
+import itertools # NEW: For generating title permutations
 
-# Your provided iterative cleaning function (placed at the top)
+# Your provided iterative cleaning function
 def clean_special_characters_iterative(data):
     """
     Iteratively cleans special characters from strings in a nested structure.
@@ -23,8 +24,7 @@ def clean_special_characters_iterative(data):
         current = queue.popleft()
 
         if isinstance(current, dict):
-            # Iterate on a copy of items to allow modification during iteration
-            for key, value in list(current.items()): 
+            for key, value in list(current.items()):
                 if isinstance(value, (dict, list)):
                     queue.append(value)
                 elif isinstance(value, str):
@@ -50,12 +50,11 @@ def clean_special_characters_iterative(data):
                     current[i] = re.sub(r'\s+', ' ', cleaned).strip()
     return data
 
-# This helper will now be very minimal, only doing basic get_text and initial nbsp -> space
-def clean_text_from_html_basic(element): # Renamed for clarity
+# Basic HTML text cleaner (still useful for initial extraction from BS4)
+def clean_text_from_html_basic(element):
     """
     Extracts text from a BeautifulSoup element, replaces non-breaking spaces
     with regular spaces, and strips whitespace.
-    Deep cleaning for non-ASCII chars is handled by clean_special_characters_iterative.
     """
     if element is None:
         return ""
@@ -67,6 +66,9 @@ def clean_text_from_html_basic(element): # Renamed for clarity
 
 
 class ConfluencePageParser:
+    # NEW: Max retries for fuzzy title matching
+    MAX_TITLE_SEARCH_RETRIES = 5 # You can adjust this number
+
     def __init__(self):
         self.base_url = ConfluenceConfig.BASE_URL
         self.api_token = ConfluenceConfig.API_TOKEN
@@ -80,6 +82,7 @@ class ConfluencePageParser:
                 "and CONFLUENCE_SPACE_KEY are set in your environment variables or .env file."
             )
 
+    # MODIFIED: _get_page_id_by_title now includes retry logic
     def _get_page_id_by_title(self, title):
         search_url = f"{self.base_url}/rest/api/content"
         headers = {
@@ -87,35 +90,94 @@ class ConfluencePageParser:
             "Authorization": f"Bearer {self.api_token}"
         }
         
-        # --- Resilient Page Title Cleaning for API Search ---
-        # 1. Normalize spaces
-        cleaned_title_for_search = " ".join(title.split()).strip() 
-        # 2. Normalize space around colon (e.g., "Table : Title" -> "Table: Title")
-        cleaned_title_for_search = cleaned_title_for_search.replace(" : ", ": ").replace(":  ", ": ") 
-        # 3. URL-encode
-        encoded_title = quote(cleaned_title_for_search, safe='') 
+        # Generator for title variations
+        def generate_title_variations(original_title):
+            # 1. Original title
+            yield original_title
+
+            # 2. Normalize multiple spaces to single spaces
+            normalized_spaces_title = " ".join(original_title.split()).strip()
+            if normalized_spaces_title != original_title:
+                yield normalized_spaces_title
+            
+            # 3. Normalize colon spacing (e.g., "Table : Title" -> "Table: Title")
+            #    Apply this to the already single-spaced title
+            normalized_colon_title = normalized_spaces_title.replace(" : ", ": ").replace(":  ", ": ")
+            if normalized_colon_title != normalized_spaces_title:
+                yield normalized_colon_title
+            
+            # 4. Try removing all spaces (if page titles can sometimes be found this way)
+            no_space_title = original_title.replace(" ", "")
+            if no_space_title != original_title:
+                yield no_space_title
+
+            # 5. Try adding spaces around colons (e.g., "Table:Title" -> "Table : Title")
+            #    This might be useful if the original has no space, but Confluence expects one.
+            tokens = re.split(r'(:)', normalized_spaces_title) # Split by colon, keep colon
+            spaced_colon_title = ""
+            for i, token in enumerate(tokens):
+                if token == ':':
+                    if i > 0 and not spaced_colon_title.endswith(' '): # Ensure space before if not there
+                        spaced_colon_title += ' '
+                    spaced_colon_title += token
+                    if i < len(tokens) - 1 and not tokens[i+1].startswith(' '): # Ensure space after if not there
+                        spaced_colon_title += ' '
+                else:
+                    spaced_colon_title += token
+            spaced_colon_title = " ".join(spaced_colon_title.split()).strip() # Re-normalize general spaces
+            if spaced_colon_title != original_title and spaced_colon_title != normalized_spaces_title:
+                 yield spaced_colon_title
+
+            # 6. Generate more permutations with varying spaces if necessary (e.g., up to MAX_RETRIES)
+            #    For deeper fuzzy matching. This could be complex.
+            #    For now, these specific patterns cover common variations.
+            #    If MAX_RETRIES is higher, we could generate more complex patterns.
+
+        tried_titles = set()
         
-        params = {
-            "title": encoded_title, 
-            "spaceKey": self.space_key,
-            "expand": "body.storage",
-            "limit": 1
-        }
+        for attempt_num, current_title_variant in enumerate(generate_title_variations(title)):
+            if attempt_num >= self.MAX_TITLE_SEARCH_RETRIES:
+                print(f"Reached MAX_TITLE_SEARCH_RETRIES ({self.MAX_TITLE_SEARCH_RETRIES}). Aborting fuzzy search.")
+                break # Exit if we hit max retries, even if generator has more
 
-        print(f"Searching for page '{cleaned_title_for_search}' in space '{self.space_key}'...")
-        response = requests.get(search_url, headers=headers, params=params)
-        response.raise_for_status()
+            if current_title_variant in tried_titles:
+                continue # Skip if already tried
+            tried_titles.add(current_title_variant)
 
-        data = response.json()
-        if data and data["results"]:
-            page = data["results"][0]
-            print(f"Found page '{page.get('title', 'N/A')}' with ID: {page['id']}") 
-            return page['id'], page['body']['storage']['value']
-        else:
-            print(f"Page with title '{cleaned_title_for_search}' not found in space '{self.space_key}'. "
-                  f"Please ensure the page title in config.py is exact and case-sensitive, "
-                  f"and that the space key '{self.space_key}' is correct.")
-            return None, None
+            encoded_title = quote(current_title_variant, safe='') 
+            
+            params = {
+                "title": encoded_title, 
+                "spaceKey": self.space_key,
+                "expand": "body.storage",
+                "limit": 1
+            }
+
+            print(f"Attempt {attempt_num + 1}/{self.MAX_TITLE_SEARCH_RETRIES}: Searching for page '{current_title_variant}' in space '{self.space_key}'...")
+            try:
+                response = requests.get(search_url, headers=headers, params=params)
+                response.raise_for_status() # This will raise HTTPError for 4xx/5xx responses
+                
+                data = response.json()
+                if data and data["results"]:
+                    page = data["results"][0]
+                    print(f"SUCCESS: Found page '{page.get('title', 'N/A')}' with ID: {page['id']} (attempt {attempt_num + 1}).") 
+                    return page['id'], page['body']['storage']['value']
+            except requests.exceptions.HTTPError as e:
+                # 404 Not Found, 401 Unauthorized, etc.
+                if e.response.status_code == 404:
+                    print(f"INFO: Page '{current_title_variant}' not found (HTTP 404). Trying next variation.")
+                else:
+                    print(f"WARNING: HTTP error {e.response.status_code} for title '{current_title_variant}'. "
+                          f"Content: {e.response.text.strip()} Trying next variation.")
+            except Exception as e:
+                print(f"ERROR: An unexpected error occurred during API call for '{current_title_variant}': {e}. Trying next variation.")
+
+        print(f"FINAL FAILURE: Page with title '{title}' not found in space '{self.space_key}' after {attempt_num + 1} attempts. "
+              f"Please ensure the page title in config.py is exact, the space key is correct, and permissions allow access.")
+        return None, None
+
+    # ... (rest of your ConfluencePageParser class and functions, including get_structured_data_from_page)
 
     def get_structured_data_from_page(self):
         page_id, page_content_html = self._get_page_id_by_title(self.page_title)
@@ -196,7 +258,6 @@ class ConfluencePageParser:
                 continue
 
             header_cells = rows[0].find_all(['th', 'td'])
-            # Use basic cleaner here, as deep cleaner will run on entire structure later
             actual_headers_raw_cleaned = [clean_text_from_html_basic(cell) for cell in header_cells]
 
             current_table_headers_mapping_strategy = {}
@@ -241,7 +302,7 @@ class ConfluencePageParser:
                 for standardized_key in keys_to_process:
                     idx = header_indices.get(standardized_key, -1) 
                     if idx != -1 and idx < len(cols):
-                        value = clean_text_from_html_basic(cols[idx]) # Using basic cleaner here
+                        value = clean_text_from_html_basic(cols[idx])
                         
                         if standardized_key in ['add_to_target', 'is_primary_key', 'deprecated']:
                             column_data[standardized_key] = (value.lower() == 'yes')
@@ -281,7 +342,6 @@ def save_structured_data_to_single_file(structured_data, output_dir="tables"):
     
     filename = os.path.join(output_dir, f"{table_name_for_file}.json")
     with open(filename, 'w', encoding='utf-8') as f:
-        # --- NEW: Apply the deep iterative cleaning here before saving ---
         cleaned_structured_data = clean_special_characters_iterative(structured_data)
         json.dump(cleaned_structured_data, f, indent=2, ensure_ascii=False)
     print(f"Saved full page data to: {filename}")
@@ -301,15 +361,13 @@ if __name__ == "__main__":
 
         if structured_data:
             print("\n--- Successfully Extracted Structured Data ---")
-            # Apply the iterative cleaner for display purposes to see the effect
             display_data = clean_special_characters_iterative(json.loads(json.dumps(structured_data))) 
             print(json.dumps(display_data, indent=2))
 
-            save_structured_data_to_single_file(structured_data) # Save to a single file
+            save_structured_data_to_single_file(structured_data)
 
             print("\n--- Columns for SQL Generation (from PRIMARY table with 'add_to_target=True') ---")
             
-            # Work with the (now implicitly cleaned for display) data
             if display_data["tables"]:
                 primary_table_data = next((t for t in display_data["tables"] if t.get("table_type") == "primary_definitions"), None)
 

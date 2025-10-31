@@ -87,7 +87,7 @@ class ConfluencePageParser:
         if not structured_page_data["metadata"].get("table_name"):
              structured_page_data["metadata"]["table_name"] = self.page_title.replace("Table: ", "").strip()
         
-        # Define ALL expected headers and their standardized keys for the *primary* table structure
+        # Define ALL expected headers and their standardized keys for the *first* table structure
         all_expected_primary_table_headers_map = {
             'Source table': 'source_table',
             'Source field name': 'source_field_name', 
@@ -125,36 +125,38 @@ class ConfluencePageParser:
             header_cells = rows[0].find_all(['th', 'td'])
             actual_headers_raw = [cell.get_text(strip=True) for cell in header_cells]
 
-            current_table_headers_map = {}
+            # Determine the header mapping strategy
+            current_table_headers_mapping_strategy = {}
             table_type = ""
 
-            if i == 0: # This is the first table, use the predefined map
+            if i == 0: # First table: Use the predefined map
                 table_type = "primary_definitions"
-                current_table_headers_map = all_expected_primary_table_headers_map
+                current_table_headers_mapping_strategy = {
+                    h_orig: h_std for h_orig, h_std in all_expected_primary_table_headers_map.items()
+                }
                 print(f"Parsing table {table_id} with predefined structure (primary_definitions).")
-            else: # Subsequent tables, parse headers dynamically
+            else: # Subsequent tables: Dynamically generate map
                 table_type = "dynamic_auxiliary"
                 print(f"Parsing table {table_id} with dynamic structure (dynamic_auxiliary).")
                 for h_raw in actual_headers_raw:
-                    # Clean headers for dynamic tables: lowercase, replace spaces/special with underscore
                     h_cleaned = h_raw.replace(' ', '_').replace('?', '').replace('-', '_').lower()
-                    current_table_headers_map[h_raw] = h_cleaned # Map raw header to cleaned key
+                    current_table_headers_mapping_strategy[h_raw] = h_cleaned # Map raw header to cleaned key
 
             parsed_table_data["table_type"] = table_type
 
             # Build header_indices for the current table's parsing logic
-            header_indices = {}
-            for original_header, standardized_key in current_table_headers_map.items():
-                try:
-                    # For dynamic tables, original_header is the actual_headers_raw entry
-                    # For primary tables, original_header is the key from all_expected_primary_table_headers_map
-                    idx = actual_headers_raw.index(original_header if i == 0 else h_raw) # Re-find index
-                    if i > 0: # For dynamic tables, we rely on the cleaned name as the key in header_indices
-                        header_indices[standardized_key] = idx
-                    else: # For primary table, use the standardized key as defined in map
-                        header_indices[standardized_key] = idx
-                except ValueError:
-                    header_indices[standardized_key] = -1
+            header_indices = {} # Maps standardized key to its column index
+            if i == 0: # For primary table, use the all_expected_primary_table_headers_map directly
+                for original_header, standardized_key in all_expected_primary_table_headers_map.items():
+                    try:
+                        header_indices[standardized_key] = actual_headers_raw.index(original_header)
+                    except ValueError:
+                        header_indices[standardized_key] = -1
+            else: # For dynamic tables, map the cleaned header names to indices
+                for col_idx, h_raw in enumerate(actual_headers_raw):
+                    h_cleaned = h_raw.replace(' ', '_').replace('?', '').replace('-', '_').lower()
+                    header_indices[h_cleaned] = col_idx
+
 
             # Process data rows (skipping the header row)
             for row in rows[1:]:
@@ -163,32 +165,31 @@ class ConfluencePageParser:
                     continue
                 
                 column_data = {}
-                # Determine which map to iterate for keys: predefined or dynamically generated
-                keys_to_process = all_expected_primary_table_headers_map.values() if i == 0 else current_table_headers_map.values()
+                # Iterate over the standardized keys from the chosen mapping strategy
+                # For primary table, use keys from all_expected_primary_table_headers_map
+                # For dynamic tables, use the keys generated dynamically (current_table_headers_mapping_strategy's values)
+                keys_to_process = list(current_table_headers_mapping_strategy.values())
                 
                 for standardized_key in keys_to_process:
-                    idx = header_indices.get(standardized_key, -1) # Get index for this standardized key
+                    idx = header_indices.get(standardized_key, -1) 
                     if idx != -1 and idx < len(cols):
                         value = cols[idx].get_text(strip=True)
                         
-                        # Type conversion for boolean-like fields
                         if standardized_key in ['add_to_target', 'is_primary_key', 'deprecated']:
                             column_data[standardized_key] = (value.lower() == 'yes')
                         else:
                             column_data[standardized_key] = value
                     else:
-                        # Assign appropriate default values for missing columns
                         if standardized_key in ['add_to_target', 'is_primary_key', 'deprecated']:
                             column_data[standardized_key] = False
                         else:
                             column_data[standardized_key] = ""
                 
-                # Only add column data if it has at least a source or target field name for the primary table,
-                # or if it's not empty for dynamic tables.
+                # Filter for adding column data
                 if i == 0: # Primary table filter
                     if column_data.get('source_field_name') or column_data.get('target_field_name'):
                         parsed_table_data["columns"].append(column_data)
-                else: # Dynamic tables, append if it has any meaningful data (not all empty strings/falses)
+                else: # Dynamic tables, append if it has any meaningful data
                     if any(v for k, v in column_data.items() if v not in ["", False, None]):
                          parsed_table_data["columns"].append(column_data)
 
@@ -196,32 +197,24 @@ class ConfluencePageParser:
             
         return structured_page_data
 
-def save_structured_data_to_files(structured_data, output_dir="tables"):
+def save_structured_data_to_single_file(structured_data, output_dir="tables"):
     """
-    Saves the full structured_data and individual table data to JSON files.
+    Saves the full structured_data to a single JSON file.
+    The filename is derived from the extracted table_name metadata.
     """
     if not structured_data:
         print("No structured data to save.")
         return
 
-    # Ensure the output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
-    page_title_sanitized = structured_data["page_title"].replace(" ", "_").replace(":", "").lower()
+    # Use table_name from metadata for the filename
+    table_name_for_file = structured_data["metadata"].get("table_name", "untitled_table").replace(" ", "_").lower()
     
-    # Save the full page data
-    full_page_filename = os.path.join(output_dir, f"{page_title_sanitized}_full_page_data.json")
-    with open(full_page_filename, 'w', encoding='utf-8') as f:
+    filename = os.path.join(output_dir, f"{table_name_for_file}.json")
+    with open(filename, 'w', encoding='utf-8') as f:
         json.dump(structured_data, f, indent=2, ensure_ascii=False)
-    print(f"Saved full page data to: {full_page_filename}")
-
-    # Save each table's columns data separately
-    for table_data in structured_data["tables"]:
-        table_filename = os.path.join(output_dir, f"{page_title_sanitized}_{table_data['id']}_columns.json")
-        with open(table_filename, 'w', encoding='utf-8') as f:
-            # We save the entire table_data dictionary, which includes 'id' and 'table_type'
-            json.dump(table_data, f, indent=2, ensure_ascii=False)
-        print(f"Saved {table_data['id']} columns to: {table_filename}")
+    print(f"Saved full page data to: {filename}")
 
 
 # Example usage
@@ -240,13 +233,12 @@ if __name__ == "__main__":
             print("\n--- Successfully Extracted Structured Data ---")
             print(json.dumps(structured_data, indent=2)) # Print to console
 
-            save_structured_data_to_files(structured_data) # Save to files
+            save_structured_data_to_single_file(structured_data) # Save to a single file
 
             # --- Example: How you would use this data for SQL generation ---
             if structured_data["tables"]:
                 print("\n--- Columns for SQL Generation (from PRIMARY table with 'add_to_target=True') ---")
                 
-                # Find the primary table
                 primary_table_data = next((t for t in structured_data["tables"] if t.get("table_type") == "primary_definitions"), None)
 
                 if primary_table_data:

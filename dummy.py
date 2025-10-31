@@ -1,125 +1,207 @@
-import re
+# confluence_client.py
+import requests
+from bs4 import BeautifulSoup
+from config import ConfluenceConfig, get_confluence_page_title
 import os
+import json # To output structured JSON
 
-def process_sql_script_with_prefix(sql_content, num_files_to_create=2):
-    """
-    Processes SQL content to create YAML files for view definitions,
-    adding a specific prefix and modifying author/id.
+class ConfluencePageParser:
+    def __init__(self):
+        self.base_url = ConfluenceConfig.BASE_URL
+        self.api_token = ConfluenceConfig.API_TOKEN
+        self.space_key = ConfluenceConfig.SPACE_KEY
+        self.page_title = get_confluence_page_title()
 
-    Args:
-        sql_content (str): The entire SQL script content as a string.
-        num_files_to_create (int): The maximum number of YAML files to create.
-    """
-    lines = sql_content.strip().split('\n')
-    output_dir = "view_yamls_full_names" # Changed output directory for clarity
-    os.makedirs(output_dir, exist_ok=True)
-
-    files_created = 0
-
-    for line in lines:
-        if files_created >= num_files_to_create:
-            break # Stop after creating the desired number of files
-
-        line = line.strip()
-        if line.startswith("create or replace secure view"):
-            # Adjusted regex to capture the full view name part
-            # including SV_REF_, SV_IBOR_, or SV_MKT_
-            match = re.match(
-                r"create or replace secure view "
-                r"ALADDINDB\.INVESTMENTS\.(SV_(?:REF|IBOR|MKT)_\w+)\s+AS\s+SELECT\s+\*\s+FROM\s+"
-                r"EDP_ADC_PUB_DB\.ADC_PUB_LL\.(SV_(?:REF|IBOR|MKT)_\w+);",
-                line
+        if not all([self.base_url, self.api_token, self.space_key]):
+            raise ValueError(
+                "Confluence configuration is incomplete. "
+                "Please ensure CONFLUENCE_BASE_URL, CONFLUENCE_API_TOKEN, "
+                "and CONFLUENCE_SPACE_KEY are set in your environment variables or .env file."
             )
 
-            if match:
-                # view_name_full will now include the SV_REF_, SV_IBOR_, or SV_MKT_ prefix
-                view_name_full = match.group(1)
-                source_table_full = match.group(2) # Though not directly used for file name here, useful to capture
+    def _get_page_id_by_title(self, title):
+        search_url = f"{self.base_url}/rest/api/content"
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self.api_token}"
+        }
+        params = {
+            "title": title,
+            "spaceKey": self.space_key,
+            "expand": "body.storage",
+            "limit": 1
+        }
 
-                full_view_path = (
-                    f"ALADDINDB.INVESTMENTS.{view_name_full}"
-                )
-                full_source_table_path = (
-                    f"EDP_ADC_PUB_DB.ADC_PUB_LL.{source_table_full}"
-                )
+        print(f"Searching for page '{title}' in space '{self.space_key}'...")
+        response = requests.get(search_url, headers=headers, params=params)
+        response.raise_for_status()
 
-                yaml_filename = f"{view_name_full}.yaml" # Use the full name for the file
-                yaml_filepath = os.path.join(output_dir, yaml_filename)
+        data = response.json()
+        if data and data["results"]:
+            page = data["results"][0]
+            print(f"Found page '{page['title']}' with ID: {page['id']}")
+            return page['id'], page['body']['storage']['value']
+        else:
+            print(f"Page '{title}' not found in space '{self.space_key}'.")
+            return None, None
 
-                # Define the prefix YAML content
-                prefix_yaml_content = f"""
-databaseChangeLog:
-  - changeSet:
-      id: {view_name_full}-view-1 # ID now uses the full view name
-      author: kvishwaj
-      runOnChange: true
-      changes:
-        - createView:
-            fullDefinition: true
-            remarks: ''
-            viewName: {view_name_full} # viewName also uses the full name
-            schemaName: INVESTMENTS
-            selectQuery: >
-"""
-                # Indent the selectQuery SQL to match the YAML structure
-                indented_sql = f"              {line}\n"
+    def get_structured_data_from_page(self): # Renamed for broader output
+        """
+        Fetches the Confluence page content and attempts to parse
+        all tables and page metadata.
+        Returns a dictionary containing page metadata and a list of parsed tables.
+        """
+        page_id, page_content_html = self._get_page_id_by_title(self.page_title)
 
-                yaml_content = prefix_yaml_content + indented_sql
+        if not page_id or not page_content_html:
+            print("Could not retrieve page content. Exiting.")
+            return None
 
+        soup = BeautifulSoup(page_content_html, 'html.parser')
+        
+        # Initialize dictionary for all structured data
+        structured_page_data = {
+            "page_title": self.page_title,
+            "page_id": page_id,
+            "metadata": {},
+            "tables": []
+        }
+
+        # --- Extract Page-Level Metadata (Table Name, DB, Schema, Keys) ---
+        # This part is highly dependent on how your SME formats the text *outside* the table
+        # Based on your initial screenshot, these were typically in <p> tags.
+        
+        # Helper to extract key-value pairs from text
+        def extract_text_metadata(soup_obj, label):
+            tag = soup_obj.find(lambda t: t.name in ['p', 'strong', 'h1', 'h2', 'h3', 'div'] and label in t.text)
+            if tag:
+                # Remove common tags and get pure text, then split
+                clean_text = ' '.join(tag.stripped_strings) # Better for mixed content
+                parts = clean_text.split(label)
+                if len(parts) > 1:
+                    value = parts[1].strip()
+                    # Remove "Historization: SCD-2" if present in Database name
+                    if label == "Database name:" and "Historization: SCD-2" in value:
+                        value = value.replace("Historization: SCD-2", "").strip()
+                    return value
+            return None
+
+        structured_page_data["metadata"]["table_name"] = extract_text_metadata(soup, "Table name:")
+        structured_page_data["metadata"]["schema_name"] = extract_text_metadata(soup, "Schema name:")
+        structured_page_data["metadata"]["database_name"] = extract_text_metadata(soup, "Database name:")
+
+        # For primary/foreign keys, they might be comma-separated
+        pk_text = extract_text_metadata(soup, "Primary Keys:")
+        if pk_text:
+            structured_page_data["metadata"]["primary_keys"] = [k.strip() for k in pk_text.split(',') if k.strip()]
+        else:
+            structured_page_data["metadata"]["primary_keys"] = [] # Default if not found
+
+        fk_text = extract_text_metadata(soup, "Foreign Keys:")
+        if fk_text:
+            structured_page_data["metadata"]["foreign_keys"] = [k.strip() for k in fk_text.split(',') if k.strip()]
+        else:
+            structured_page_data["metadata"]["foreign_keys"] = [] # Default if not found
+
+        # Fallback if primary page metadata extraction fails
+        if not structured_page_data["metadata"].get("table_name"):
+             structured_page_data["metadata"]["table_name"] = "portfolio_ops" # Based on the page title
+        
+        # Source table name from the columns, or a default
+        structured_page_data["metadata"]["source_table_full_name"] = "portdb_portfolio_ops" # Still assuming this, can make dynamic if needed
+
+
+        # --- Extract Table Data (Iterate through all tables) ---
+        all_html_tables = soup.find_all('table')
+        if not all_html_tables:
+            print("No tables found on the Confluence page.")
+            return structured_page_data # Return metadata even if no tables
+
+        for i, html_table in enumerate(all_html_tables):
+            table_id = f"table_{i+1}"
+            parsed_table_data = {
+                "id": table_id,
+                "columns": []
+            }
+            
+            rows = html_table.find_all('tr')
+            if not rows:
+                print(f"Table {table_id} has no rows. Skipping.")
+                continue
+
+            # Extract headers from the first row (assuming first row is always headers)
+            # Use 'th' if available, otherwise 'td' for the first row
+            header_cells = rows[0].find_all(['th', 'td'])
+            headers = [cell.get_text(strip=True) for cell in header_cells]
+
+            # Define headers we specifically need for SQL generation.
+            # We'll use these to filter and rename.
+            required_output_headers = {
+                'Source table': 'source_table',
+                'Source field name': 'source_field_name', 
+                'Add Source To Target?': 'add_to_target', 
+                'Target Field name': 'target_field_name'
+            }
+            
+            # Find indices for the headers we care about in the *actual* table headers
+            header_indices = {}
+            for req_header_orig, req_header_standardized in required_output_headers.items():
                 try:
-                    with open(yaml_filepath, 'w') as f:
-                        f.write(yaml_content.strip())
-                    print(f"Created {yaml_filepath}")
-                    files_created += 1
-                except IOError as e:
-                    print(f"Error writing file {yaml_filepath}: {e}")
-            else:
-                print(f"Warning: Could not parse line (regex mismatch): {line}")
+                    header_indices[req_header_standardized] = headers.index(req_header_orig)
+                except ValueError:
+                    print(f"Warning: Required header '{req_header_orig}' not found in table {table_id}. It might be skipped.")
+                    # If a critical header is missing, we might decide to skip the whole table
+                    # For now, we'll allow it and the corresponding field will be missing.
+                    header_indices[req_header_standardized] = -1 # Sentinel value
 
-# Example Usage:
-# Replace this multiline string with the actual content of your SQL file
-sql_script_content = """
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_SECURITY_RELATIONSHIP_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_SECURITY_RELATIONSHIP_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_SECURITY_RELATIONSHIP AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_SECURITY_RELATIONSHIP;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_SECURITY_RATE_CALCULATION_DETAIL_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_SECURITY_RATE_CALCULATION_DETAIL_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_SECURITY_RATE_CALCULATION_DETAIL AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_SECURITY_RATE_CALCULATION_DETAIL;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_SECURITY_AMOUNT_OUTSTANDING_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_SECURITY_AMOUNT_OUTSTANDING_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_SECURITY_AMOUNT_OUTSTANDING AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_SECURITY_AMOUNT_OUTSTANDING;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_PORTFOLIOS_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_PORTFOLIOS_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_PORTFOLIOS AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_PORTFOLIOS;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_PORTFOLIO_VALUATION_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_PORTFOLIO_VALUATION_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_PORTFOLIO_VALUATION AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_PORTFOLIO_VALUATION;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_PORTFOLIO_OPS_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_PORTFOLIO_OPS_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_PORTFOLIO_OPS AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_PORTFOLIO_OPS;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_PORTFOLIO_ASSIGNMENTS_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_PORTFOLIO_ASSIGNMENTS_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_PORTFOLIO_ASSIGNMENTS AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_PORTFOLIO_ASSIGNMENTS;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_PORTFOLIO_ASSIGNMENT_TEAM_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_PORTFOLIO_ASSIGNMENT_TEAM_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_PORTFOLIO_ASSIGNMENT_TEAM AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_PORTFOLIO_ASSIGNMENT_TEAM;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_PORT_GROUP_EXPAND_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_PORT_GROUP_EXPAND_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_PORT_GROUP_EXPAND AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_PORT_GROUP_EXPAND;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_LOOKUP_DECODE_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_LOOKUP_DECODE_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_LOOKUP_DECODE AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_LOOKUP_DECODE;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_SECTOR_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_SECTOR_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_SECTOR AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_SECTOR;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_PROGRAM_STEM_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_PROGRAM_STEM_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_PROGRAM_STEM AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_PROGRAM_STEM;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_NOTE_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_NOTE_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_NOTE AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_NOTE;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_IDENTIFIER_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_IDENTIFIER_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_IDENTIFIER AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_IDENTIFIER;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_HIERARCHY_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_HIERARCHY_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_HIERARCHY AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_HIERARCHY;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_FEATURE_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_FEATURE_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_FEATURE AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_FEATURE;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_CREDIT_EVENT_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_CREDIT_EVENT_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_CREDIT_EVENT AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_CREDIT_EVENT;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_CREDIT_ENHANCEMENT_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_CREDIT_ENHANCEMENT_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_CREDIT_ENHANCEMENT AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_CREDIT_ENHANCEMENT;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_COUNTRY_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_COUNTRY_HIST;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_COUNTRY AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_COUNTRY;
-create or replace secure view ALADDINDB.INVESTMENTS.SV_REF_ALADDIN_ISSUER_CLIENT_DEFINED_FIELD_HIST AS SELECT * FROM EDP_ADC_PUB_DB.ADC_PUB_LL.SV_REF_ALADDIN_ISSUER_CLIENT_DEFINED_FIELD_HIST;
-"""
+            # Process data rows
+            for row in rows[1:]: # Skip the first row (headers)
+                cols = row.find_all('td')
+                if len(cols) > 0:
+                    column_data = {}
+                    for standardized_name, idx in header_indices.items():
+                        if idx != -1 and idx < len(cols):
+                            # Use .get_text(strip=True) to get clean text, ignoring HTML tags
+                            column_data[standardized_name] = cols[idx].get_text(strip=True)
+                        else:
+                            column_data[standardized_name] = "" # Assign empty string if column is missing or header not found
+                    parsed_table_data["columns"].append(column_data)
+            
+            structured_page_data["tables"].append(parsed_table_data)
+            
+        return structured_page_data
 
-# Call the function with num_files_to_create set to 2
-process_sql_script_with_prefix(sql_script_content, num_files_to_create=2)
+# Example usage
+if __name__ == "__main__":
+    if os.getenv("CONFLUENCE_API_TOKEN"):
+        print(".env file loaded successfully (Confluence API token found).")
+    else:
+        print("Warning: .env file might not be loaded or CONFLUENCE_API_TOKEN not set.")
+        print("Please ensure your .env file is in the same directory and contains the necessary credentials.")
+
+    try:
+        parser = ConfluencePageParser()
+        structured_data = parser.get_structured_data_from_page()
+
+        if structured_data:
+            print("\n--- Successfully Extracted Structured Data ---")
+            # Pretty print the JSON output
+            print(json.dumps(structured_data, indent=2))
+
+            # You can now access metadata and individual tables
+            # For example, to get columns from the first table:
+            if structured_data["tables"]:
+                main_table_columns = structured_data["tables"][0]["columns"]
+                print("\nExample: Columns from the first table:")
+                for col in main_table_columns:
+                    print(col)
+        else:
+            print("\n--- Failed to extract data from Confluence ---")
+
+    except requests.exceptions.HTTPError as e:
+        print(f"HTTP Error during Confluence API call: {e}")
+        print(f"Response content: {e.response.text}")
+    except ValueError as e:
+        print(f"Configuration Error: {e}")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}. Trace: {e.__traceback__.tb_frame.f_code.co_filename}:{e.__traceback__.tb_lineno}")

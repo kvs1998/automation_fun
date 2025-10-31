@@ -4,7 +4,36 @@ from bs4 import BeautifulSoup
 from config import ConfluenceConfig, get_confluence_page_title
 import os
 import json
-from datetime import datetime
+from urllib.parse import quote # NEW: For URL encoding page titles
+import unicodedata # NEW: For Unicode normalization and cleaning
+
+# NEW: Helper function for robust text cleaning from HTML elements
+def clean_text_from_html(element):
+    """
+    Extracts text from a BeautifulSoup element, removes common HTML entities,
+    normalizes Unicode, and strips whitespace.
+    """
+    if element is None:
+        return ""
+    
+    # Get raw text, which generally handles many HTML entities
+    text = element.get_text(separator=" ", strip=True) 
+    
+    # Replace non-breaking space (U+00A0) to regular space, and explicit entity
+    text = text.replace(u'\xa0', u' ') # Common non-breaking space character
+    text = text.replace('&nbsp;', ' ') # Explicit non-breaking space entity
+
+    # Replace other common problematic Unicode characters
+    text = text.replace('\u2013', '-') # En dash to hyphen
+    text = text.replace('\u2014', '-') # Em dash to hyphen
+    text = text.replace('\u2018', "'").replace('\u2019', "'") # Curly single quotes to straight
+    text = text.replace('\u201c', '"').replace('\u201d', '"') # Curly double quotes to straight
+    text = text.replace('\u2026', '...') # Ellipsis character
+
+    # Unicode normalization for compatibility decomposition (e.g., separate accents)
+    text = unicodedata.normalize('NFKD', text).strip()
+    
+    return text
 
 class ConfluencePageParser:
     def __init__(self):
@@ -20,20 +49,22 @@ class ConfluencePageParser:
                 "and CONFLUENCE_SPACE_KEY are set in your environment variables or .env file."
             )
 
-
-    def _get_page_id_and_content_html(self, title):
-        """
-        Retrieves the page ID and content (in storage format) for a given page title.
-        """
+    def _get_page_id_by_title(self, title):
         search_url = f"{self.base_url}/rest/api/content"
         headers = {
             "Accept": "application/json",
             "Authorization": f"Bearer {self.api_token}"
         }
+        
+        # NEW: Explicitly URL-encode the title parameter
+        # safe='' ensures that spaces, colons, and virtually all other non-alphanumeric
+        # characters (except standard path separators if needed, but not here) are encoded.
+        encoded_title = quote(title, safe='') 
+        
         params = {
-            "title": title,
+            "title": encoded_title, 
             "spaceKey": self.space_key,
-            "expand": "body.storage", # Request storage format content
+            "expand": "body.storage",
             "limit": 1
         }
 
@@ -44,14 +75,18 @@ class ConfluencePageParser:
         data = response.json()
         if data and data["results"]:
             page = data["results"][0]
-            print(f"Found page '{page['title']}' with ID: {page['id']}")
+            # It's good practice to log the exact title Confluence returned from the API, 
+            # as it might have subtle differences from the requested title.
+            print(f"Found page '{page.get('title', 'N/A')}' with ID: {page['id']}") 
             return page['id'], page['body']['storage']['value']
         else:
-            print(f"Page '{title}' not found in space '{self.space_key}'.")
+            # NEW: More specific message if page not found
+            print(f"Page with title '{title}' not found in space '{self.space_key}'. "
+                  f"Please ensure the page title in config.py is exact and case-sensitive.")
             return None, None
 
     def get_structured_data_from_page(self):
-        page_id, page_content_html = self._get_page_id_and_content_html(self.page_title)
+        page_id, page_content_html = self._get_page_id_by_title(self.page_title)
 
         if not page_id or not page_content_html:
             print("Could not retrieve page content. Exiting.")
@@ -60,48 +95,20 @@ class ConfluencePageParser:
         soup = BeautifulSoup(page_content_html, 'html.parser')
         
         structured_page_data = {
-            "page_title": self.page_title, 
+            "page_title": self.page_title,
             "page_id": page_id,
             "metadata": {},
             "tables": []
         }
 
-        # --- Helper to extract key-value pairs from content HTML ---
-        def extract_text_metadata_from_content(soup_obj, label_start_str):
-            # Confluence Storage Format often wraps text like "Author: Chris Lee" in <p> or <div>.
-            # We look for the raw text content to contain the label_start_str.
-            target_element = soup_obj.find(lambda t: t.name in ['p', 'div', 'strong', 'em', 'span'] and label_start_str in t.get_text(strip=True))
-            if target_element:
-                # Use .stripped_strings to get clean text, handling potential mixed tags
-                full_text = ' '.join(target_element.stripped_strings).strip()
-                if label_start_str in full_text:
-                    value = full_text.split(label_start_str, 1)[1].strip()
-                    # Clean up date if possible
-                    if label_start_str == "Last Changed by:": # Expecting "Name Date"
-                        parts = value.rsplit(' ', 2) # Split from right, max 2 times to get possible date
-                        if len(parts) >= 2:
-                            name = ' '.join(parts[:-1]) # Name part
-                            date_str = parts[-1]        # Date part
-                            
-                            try: # Try specific Confluence date formats
-                                # Example: Sep 11, 2023 or Oct 28, 2025
-                                parsed_date = datetime.strptime(date_str, '%b %d, %Y')
-                                return name, parsed_date.isoformat()
-                            except ValueError:
-                                return name, date_str # Fallback if date parsing fails
-                        return value, None # No specific date part found
-                    return value
-            return None
-
-        # --- Extract Page-Level Metadata from the content HTML ---
-        # Assuming these are typically in <p> tags at the top of the content
-        
-        # Table Name, Schema, Database, Primary/Foreign Keys (from previous logic)
-        def extract_text_metadata_for_labels(soup_obj, label): # Renamed to avoid clash
-            tag = soup_obj.find(lambda t: t.name in ['p', 'div', 'h1', 'h2', 'h3'] and label in t.get_text(strip=True))
+        # --- Extract Page-Level Metadata ---
+        def extract_text_metadata(soup_obj, label):
+            # NEW: Use clean_text_from_html when searching within element text
+            tag = soup_obj.find(lambda t: t.name in ['p', 'div', 'h1', 'h2', 'h3'] and label in clean_text_from_html(t))
             if tag:
-                clean_text = ' '.join(tag.stripped_strings)
-                parts = clean_text.split(label, 1)
+                # NEW: Use clean_text_from_html to get the element's full text
+                clean_full_text = clean_text_from_html(tag)
+                parts = clean_full_text.split(label, 1)
                 if len(parts) > 1:
                     value = parts[1].strip()
                     if label == "Database name:" and "Historization: SCD-2" in value:
@@ -109,43 +116,19 @@ class ConfluencePageParser:
                     return value
             return None
 
-        structured_page_data["metadata"]["table_name"] = extract_text_metadata_for_labels(soup, "Table name:")
-        structured_page_data["metadata"]["schema_name"] = extract_text_metadata_for_labels(soup, "Schema name:")
-        structured_page_data["metadata"]["database_name"] = extract_text_metadata_for_labels(soup, "Database name:")
+        structured_page_data["metadata"]["table_name"] = extract_text_metadata(soup, "Table name:")
+        structured_page_data["metadata"]["schema_name"] = extract_text_metadata(soup, "Schema name:")
+        structured_page_data["metadata"]["database_name"] = extract_text_metadata(soup, "Database name:")
 
-        pk_text = extract_text_metadata_for_labels(soup, "Primary Keys:")
+        pk_text = extract_text_metadata(soup, "Primary Keys:")
         structured_page_data["metadata"]["primary_keys"] = [k.strip() for k in pk_text.split(',') if k.strip()] if pk_text else []
 
-        fk_text = extract_text_metadata_for_labels(soup, "Foreign Keys:")
+        fk_text = extract_text_metadata(soup, "Foreign Keys:")
         structured_page_data["metadata"]["foreign_keys"] = [k.strip() for k in fk_text.split(',') if k.strip()] if fk_text else []
 
         if not structured_page_data["metadata"].get("table_name"):
              structured_page_data["metadata"]["table_name"] = self.page_title.replace("Table: ", "").strip()
-
-        # Extract Author and Last Changed Info from 'Created by' and 'last modified on' lines
-        # These are usually at the very top of the Confluence Storage Format
-        created_by_tag = soup.find('p', class_='smalltext') # Often "Created by X, last modified on Y"
-        if created_by_tag:
-            text = created_by_tag.get_text(strip=True)
-            # Example: "Created by Chris Lee, last modified on Oct 28, 2025"
-            if "Created by" in text:
-                author_part = text.split("Created by", 1)[1].strip()
-                if "last modified on" in author_part:
-                    author_name = author_part.split(", last modified on", 1)[0].strip()
-                    modified_date_str = author_part.split(", last modified on", 1)[1].strip()
-                    
-                    structured_page_data["metadata"]["page_author"] = author_name
-                    structured_page_data["metadata"]["page_last_changed_by"] = author_name # Assuming same person
-                    try:
-                        structured_page_data["metadata"]["page_last_changed_date"] = datetime.strptime(modified_date_str, '%b %d, %Y').isoformat()
-                    except ValueError:
-                        structured_page_data["metadata"]["page_last_changed_date"] = modified_date_str # Fallback
-                else:
-                    structured_page_data["metadata"]["page_author"] = author_part.strip()
-                    structured_page_data["metadata"]["page_last_changed_by"] = author_part.strip()
-                    structured_page_data["metadata"]["page_last_changed_date"] = None # No date found
-
-
+        
         # Define ALL expected headers and their standardized keys for the *first* table structure
         all_expected_primary_table_headers_map = {
             'Source table': 'source_table',
@@ -166,7 +149,7 @@ class ConfluencePageParser:
         # --- Extract Table Data (Iterate through all tables) ---
         all_html_tables = soup.find_all('table')
         if not all_html_tables:
-            print("No tables found on the Confluence page content.")
+            print("No tables found on the Confluence page.")
             return structured_page_data
 
         for i, html_table in enumerate(all_html_tables):
@@ -182,8 +165,10 @@ class ConfluencePageParser:
                 continue
 
             header_cells = rows[0].find_all(['th', 'td'])
-            actual_headers_raw = [cell.get_text(strip=True) for cell in header_cells]
+            # NEW: Apply cleaning to raw headers immediately after extraction
+            actual_headers_raw_cleaned = [clean_text_from_html(cell) for cell in header_cells]
 
+            # Determine the header mapping strategy
             current_table_headers_mapping_strategy = {}
             table_type = ""
 
@@ -196,37 +181,43 @@ class ConfluencePageParser:
             else: # Subsequent tables: Dynamically generate map
                 table_type = "dynamic_auxiliary"
                 print(f"Parsing table {table_id} with dynamic structure (dynamic_auxiliary).")
-                for h_raw in actual_headers_raw:
-                    h_cleaned = h_raw.replace(' ', '_').replace('?', '').replace('-', '_').lower()
-                    current_table_headers_mapping_strategy[h_raw] = h_cleaned
+                for h_raw_cleaned in actual_headers_raw_cleaned: # Already cleaned header string
+                    # NEW: Clean string for map key, ensuring consistency
+                    h_cleaned_for_map = h_raw_cleaned.replace(' ', '_').replace('?', '').replace('-', '_').lower()
+                    current_table_headers_mapping_strategy[h_raw_cleaned] = h_cleaned_for_map # Map original cleaned header to standardized key
 
             parsed_table_data["table_type"] = table_type
 
-            header_indices = {}
-            if i == 0:
+            # Build header_indices for the current table's parsing logic
+            header_indices = {} # Maps standardized key to its column index
+            if i == 0: # For primary table, match expected original headers to their index in the cleaned actual headers
                 for original_header, standardized_key in all_expected_primary_table_headers_map.items():
                     try:
-                        header_indices[standardized_key] = actual_headers_raw.index(original_header)
+                        header_indices[standardized_key] = actual_headers_raw_cleaned.index(original_header)
                     except ValueError:
                         header_indices[standardized_key] = -1
-            else:
-                for col_idx, h_raw in enumerate(actual_headers_raw):
-                    h_cleaned = h_raw.replace(' ', '_').replace('?', '').replace('-', '_').lower()
-                    header_indices[h_cleaned] = col_idx
+            else: # For dynamic tables, map the standardized (cleaned and formatted) header names to indices
+                for col_idx, h_raw_cleaned in enumerate(actual_headers_raw_cleaned): # Iterate over already cleaned headers
+                    h_cleaned_for_map = h_raw_cleaned.replace(' ', '_').replace('?', '').replace('-', '_').lower()
+                    header_indices[h_cleaned_for_map] = col_idx
 
 
+            # Process data rows (skipping the header row)
             for row in rows[1:]:
                 cols = row.find_all('td')
                 if not cols:
                     continue
                 
                 column_data = {}
+                # Determine which set of standardized keys to process
+                # For primary table, these come from all_expected_primary_table_headers_map's values
+                # For dynamic tables, these are the values (cleaned keys) from current_table_headers_mapping_strategy
                 keys_to_process = list(current_table_headers_mapping_strategy.values())
                 
                 for standardized_key in keys_to_process:
                     idx = header_indices.get(standardized_key, -1) 
                     if idx != -1 and idx < len(cols):
-                        value = cols[idx].get_text(strip=True)
+                        value = clean_text_from_html(cols[idx]) # NEW: Apply cleaning to cell content
                         
                         if standardized_key in ['add_to_target', 'is_primary_key', 'deprecated']:
                             column_data[standardized_key] = (value.lower() == 'yes')
@@ -238,10 +229,11 @@ class ConfluencePageParser:
                         else:
                             column_data[standardized_key] = ""
                 
-                if i == 0:
+                # Filter for adding column data
+                if i == 0: # Primary table filter
                     if column_data.get('source_field_name') or column_data.get('target_field_name'):
                         parsed_table_data["columns"].append(column_data)
-                else:
+                else: # Dynamic tables, append if it has any meaningful data
                     if any(v for k, v in column_data.items() if v not in ["", False, None]):
                          parsed_table_data["columns"].append(column_data)
 
@@ -250,12 +242,17 @@ class ConfluencePageParser:
         return structured_page_data
 
 def save_structured_data_to_single_file(structured_data, output_dir="tables"):
+    """
+    Saves the full structured_data to a single JSON file.
+    The filename is derived from the extracted table_name metadata.
+    """
     if not structured_data:
         print("No structured data to save.")
         return
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # Use table_name from metadata for the filename
     table_name_for_file = structured_data["metadata"].get("table_name", "untitled_table").replace(" ", "_").lower()
     
     filename = os.path.join(output_dir, f"{table_name_for_file}.json")
@@ -278,10 +275,11 @@ if __name__ == "__main__":
 
         if structured_data:
             print("\n--- Successfully Extracted Structured Data ---")
-            print(json.dumps(structured_data, indent=2))
+            print(json.dumps(structured_data, indent=2)) # Print to console
 
-            save_structured_data_to_single_file(structured_data)
+            save_structured_data_to_single_file(structured_data) # Save to a single file
 
+            # --- Example: How you would use this data for SQL generation ---
             if structured_data["tables"]:
                 print("\n--- Columns for SQL Generation (from PRIMARY table with 'add_to_target=True') ---")
                 

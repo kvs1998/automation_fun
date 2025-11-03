@@ -20,11 +20,11 @@ class SnowflakeConfig:
     SCHEMA = os.getenv("SNOWFLAKE_SCHEMA")
     ROLE = os.getenv("SNOWFLAKE_ROLE")
 
-# NEW: Configuration for input/output files
 class FilePaths:
-    TITLES_JSON_FILE = "titles.json" # Input: list of page titles
-    REPORT_JSON_FILE = "confluence_ingest_report.json" # Output: hit-or-miss report
-    TABLES_DIR = "tables" # Output directory for structured table data (used later)
+    TITLES_JSON_FILE = "titles.json"
+    REPORT_JSON_FILE = "confluence_ingest_report.json"
+    TABLES_DIR = "tables" # Output directory for structured table data
+    DB_FILE = "confluence_metadata.db" # NEW: SQLite database file name
 
 def get_confluence_page_titles(json_file_path=FilePaths.TITLES_JSON_FILE):
     """

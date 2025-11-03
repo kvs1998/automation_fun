@@ -43,13 +43,13 @@ class DatabaseManager:
             given_title TEXT NOT NULL,
             found_title TEXT,
             page_status TEXT NOT NULL, -- HIT, MISS, ERROR
-            user_verified INTEGER NOT NULL DEFAULT 0, -- FIX: Changed BOOLEAN to INTEGER, default 0
+            user_verified INTEGER NOT NULL DEFAULT 0,
             attempts_made INTEGER,
             api_title TEXT,             -- Actual title from expanded API call
             api_type TEXT,              -- E.g., "page", "blogpost"
             api_status TEXT,            -- E.g., "current"
-            author_display_name TEXT,
-            author_username TEXT,
+            -- REMOVED: author_display_name TEXT,
+            -- REMOVED: author_username TEXT,
             last_modified_by_display_name TEXT,
             last_modified_by_username TEXT,
             last_modified_date TEXT,    -- ISO format
@@ -62,7 +62,7 @@ class DatabaseManager:
             first_checked_on TEXT,      -- ISO format (from report)
             last_checked_on TEXT,       -- ISO format (from report)
             extraction_status TEXT,     -- PENDING_METADATA_INGESTION, METADATA_INGESTED, PARSED_OK, PARSE_FAILED, DB_FAILED
-            hash_id TEXT,               -- NEW: Hash of key metadata fields
+            hash_id TEXT,               -- Hash of key metadata fields
             structured_data_file TEXT,  -- Link to JSON file (e.g., portfolio_ops.json)
             notes TEXT                  -- From report or new parsing notes
         );

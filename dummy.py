@@ -14,6 +14,16 @@ The extraction_status column (and potentially user_verified) provides granular c
 - DB_FAILED: Database operation failed.
 
 
+table_name_from_parsed_content = cleaned_structured_data.get("metadata", {}).get("table_name", api_title)
+        sanitized_table_name_for_ref = re.sub(r'[^a-z0-9_.-]', '', table_name_from_parsed_content.lower().replace(" ", "_"))
+
+        page_entry["structured_data_file"] = f"{sanitized_table_name_for_ref}.json" # Store sanitized name as a reference
+        page_entry["extraction_status"] = "PARSED_OK"
+        page_entry["last_parsed_content_hash"] = current_metadata_hash
+        db_manager.insert_or_update_parsed_content(page_id, parsed_json_str) # Store parsed JSON in DB
+        print(f"  Structured content for '{api_title}' (ID: {page_id}) parsed and stored in DB.")
+
+
 def clean_special_characters_iterative(data):
     """
     Iteratively cleans special (non-ASCII printable) characters from strings

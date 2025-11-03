@@ -1,6 +1,18 @@
-# confluence_utils.py (MODIFIED clean_special_characters_iterative)
+The extraction_status column (and potentially user_verified) provides granular control over your data pipeline:
 
-# ... (rest of imports)
+
+- PENDING_METADATA_INGESTION: Waiting for metadata to be fetched.
+
+- METADATA_INGESTED: Metadata is in the DB, ready for content parsing.
+
+- PENDING_PARSE_APPROVAL: (Optional) User intervention needed before content parsing.
+
+- PARSED_OK: Content parsed and saved.
+
+- PARSE_FAILED: Something went wrong during content parsing.
+
+- DB_FAILED: Database operation failed.
+
 
 def clean_special_characters_iterative(data):
     """

@@ -12,37 +12,34 @@ from database_manager import DatabaseManager
 def calculate_metadata_hash(metadata_dict):
     """
     Calculates an SHA256 hash for key metadata fields to track changes.
-    Uses 'author_username', 'created_date', 'last_modified_by_username',
+    Uses 'created_by_username', 'created_date', 'last_modified_by_username',
     'last_modified_date', 'parent_page_id', 'labels'.
     """
-    # Ensure all relevant fields are strings for hashing
     data_points = []
-    data_points.append(str(metadata_dict.get('author_username', '')))
+    # FIX: Use created_by_username as the primary "author" identifier for the hash
+    data_points.append(str(metadata_dict.get('created_by_username', '')))
     data_points.append(str(metadata_dict.get('created_date', '')))
     data_points.append(str(metadata_dict.get('last_modified_by_username', '')))
     data_points.append(str(metadata_dict.get('last_modified_date', '')))
     data_points.append(str(metadata_dict.get('parent_page_id', '')))
     
-    # Labels should be sorted for consistent hashing
     labels = metadata_dict.get('labels', [])
     if isinstance(labels, list):
-        data_points.append(json.dumps(sorted(labels))) # Sort list, then dump to string
-    elif isinstance(labels, str): # If already a JSON string from DB
+        data_points.append(json.dumps(sorted(labels)))
+    elif isinstance(labels, str):
         try:
             parsed_labels = json.loads(labels)
             if isinstance(parsed_labels, list):
                 data_points.append(json.dumps(sorted(parsed_labels)))
             else:
-                data_points.append(labels) # If not a list, use as is
+                data_points.append(labels)
         except json.JSONDecodeError:
-            data_points.append(labels) # Use as is if invalid JSON string
+            data_points.append(labels)
     else:
-        data_points.append('') # Fallback for non-string, non-list labels
+        data_points.append('')
 
-    # Concatenate all data points into a single string
     hash_input = "|".join(data_points)
     
-    # Calculate SHA256 hash
     return hashlib.sha256(hash_input.encode('utf-8')).hexdigest()
 
 

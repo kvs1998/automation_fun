@@ -1,20 +1,18 @@
 # database_manager.py
 import sqlite3
 import os
-from config import FilePaths # Import FilePaths for DB_FILE location
+from config import FilePaths
 from datetime import datetime
 
 class DatabaseManager:
     def __init__(self, db_file=None):
         if db_file is None:
-            # Default to DB_FILE in TABLES_DIR
             self.db_file = os.path.join(FilePaths.TABLES_DIR, FilePaths.DB_FILE)
         else:
             self.db_file = db_file
         
-        # Ensure the directory for the DB file exists
         db_dir = os.path.dirname(self.db_file)
-        if db_dir: # Only create if db_file is in a subdirectory
+        if db_dir:
             os.makedirs(db_dir, exist_ok=True)
             
         self.conn = None
@@ -25,7 +23,7 @@ class DatabaseManager:
         """Establishes a connection to the SQLite database."""
         try:
             self.conn = sqlite3.connect(self.db_file)
-            self.conn.row_factory = sqlite3.Row # Allows accessing columns by name
+            self.conn.row_factory = sqlite3.Row
             print(f"Connected to SQLite database: {self.db_file}")
         except sqlite3.Error as e:
             print(f"Error connecting to database: {e}")
@@ -45,7 +43,7 @@ class DatabaseManager:
             given_title TEXT NOT NULL,
             found_title TEXT,
             page_status TEXT NOT NULL, -- HIT, MISS, ERROR
-            user_verified BOOLEAN NOT NULL DEFAULT FALSE,
+            user_verified INTEGER NOT NULL DEFAULT 0, -- FIX: Changed BOOLEAN to INTEGER, default 0
             attempts_made INTEGER,
             api_title TEXT,             -- Actual title from expanded API call
             api_type TEXT,              -- E.g., "page", "blogpost"
@@ -69,8 +67,6 @@ class DatabaseManager:
             notes TEXT                  -- From report or new parsing notes
         );
         """
-        # FIX: The dangling comma after "notes TEXT" above was removed.
-        # It should now end with "notes TEXT\n);"
         try:
             cursor = self.conn.cursor()
             cursor.execute(sql_create_table)
@@ -96,7 +92,6 @@ class DatabaseManager:
         exists = cursor.fetchone()
 
         if exists:
-            # Update existing record
             update_cols = [col for col in metadata_dict.keys() if col in columns and col != 'page_id']
             set_clause = ", ".join([f"{col} = ?" for col in update_cols])
             update_values = [metadata_dict[col] for col in update_cols]
@@ -106,7 +101,6 @@ class DatabaseManager:
             cursor.execute(sql, tuple(update_values))
             print(f"Updated metadata for page_id: {metadata_dict['page_id']}")
         else:
-            # Insert new record
             insert_cols = [col for col in metadata_dict.keys() if col in columns]
             placeholders = ", ".join(["?" for _ in insert_cols])
             insert_values = [metadata_dict[col] for col in insert_cols]

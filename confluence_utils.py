@@ -1,10 +1,11 @@
-# confluence_utils.py
+# confluence_utils.py (Full code for this file)
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import quote
 import re 
 from collections import deque
 from datetime import datetime
+import json # For handling labels as JSON string
 
 
 # Your provided iterative cleaning function
@@ -65,6 +66,8 @@ def clean_text_from_html_basic(element):
 
 class ConfluencePageParser:
     MAX_TITLE_SEARCH_RETRIES = 5
+    # Define common expand parameters for detailed metadata (NO body.storage here)
+    EXPAND_METADATA_PARAMS = "history.createdBy,history.createdDate,history.lastUpdated.by,history.lastUpdated.when,metadata.labels,ancestors"
 
     def __init__(self, base_url, api_token, space_key):
         self.base_url = base_url
@@ -166,3 +169,193 @@ class ConfluencePageParser:
             "notes": f"Page not found after all {attempts_made} variations.",
             "attempts_made": attempts_made
         }
+
+    # NEW: Method to fetch ONLY expanded page metadata (no body.storage)
+    def get_expanded_page_metadata(self, page_id): # Renamed
+        """
+        Fetches ONLY expanded metadata for a given page ID.
+        Does NOT fetch body.storage content at this stage.
+        """
+        content_url = f"{self.base_url}/rest/api/content/{page_id}"
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self.api_token}"
+        }
+        params = {
+            "expand": self.EXPAND_METADATA_PARAMS # Use the metadata only expand params
+        }
+
+        print(f"Fetching expanded metadata for page ID: {page_id}...")
+        response = requests.get(content_url, headers=headers, params=params)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        # Extract desired metadata
+        metadata = {
+            "api_title": data.get('title'),
+            "api_type": data.get('type'),
+            "api_status": data.get('status'),
+        }
+
+        history = data.get('history', {})
+        created_by = history.get('createdBy', {})
+        last_updated_by = history.get('lastUpdated', {}).get('by', {})
+        last_updated_when = history.get('lastUpdated', {}).get('when')
+
+        metadata.update({
+            "created_by_display_name": created_by.get('displayName'),
+            "created_by_username": created_by.get('username'),
+            "created_date": history.get('createdDate'),
+            "last_modified_by_display_name": last_updated_by.get('displayName'),
+            "last_modified_by_username": last_updated_by.get('username'),
+            "last_modified_date": last_updated_when,
+            "parent_page_title": None, # Set default, update if found
+            "parent_page_id": None,
+            "labels": [] 
+        })
+        
+        labels_data = data.get('metadata', {}).get('labels', {}).get('results', [])
+        metadata['labels'] = [label.get('name') for label in labels_data if label.get('name')]
+
+        ancestors = data.get('ancestors', [])
+        if ancestors:
+            parent = ancestors[-1] 
+            metadata['parent_page_title'] = parent.get('title')
+            metadata['parent_page_id'] = parent.get('id')
+
+        return metadata
+
+
+    # This method remains unchanged for now, will be used in Stage 3
+    def get_structured_data_from_html(self, page_id, page_title_for_struct, page_content_html):
+        """
+        Parses the Confluence page content HTML into a structured dictionary of tables and columns.
+        This function expects raw HTML content and does not make API calls.
+        """
+        soup = BeautifulSoup(page_content_html, 'html.parser')
+        
+        structured_page_data = {
+            "page_title": page_title_for_struct,
+            "page_id": page_id,
+            "metadata": {}, 
+            "tables": []
+        }
+
+        # --- Extract Page-Level (table-specific) Metadata from content HTML ---
+        def extract_text_metadata(soup_obj, label):
+            tag = soup_obj.find(lambda t: t.name in ['p', 'div', 'h1', 'h2', 'h3'] and label in clean_text_from_html_basic(t))
+            if tag:
+                clean_full_text = clean_text_from_html_basic(tag)
+                parts = clean_full_text.split(label, 1)
+                if len(parts) > 1:
+                    value = parts[1].strip()
+                    if label == "Database name:" and "Historization: SCD-2" in value:
+                        value = value.replace("Historization: SCD-2", "").strip()
+                    return value
+            return None
+
+        structured_page_data["metadata"]["table_name"] = extract_text_metadata(soup, "Table name:")
+        structured_page_data["metadata"]["schema_name"] = extract_text_metadata(soup, "Schema name:")
+        structured_page_data["metadata"]["database_name"] = extract_text_metadata(soup, "Database name:")
+
+        pk_text = extract_text_metadata(soup, "Primary Keys:")
+        structured_page_data["metadata"]["primary_keys"] = [k.strip() for k in pk_text.split(',') if k.strip()] if pk_text else []
+
+        fk_text = extract_text_metadata(soup, "Foreign Keys:")
+        structured_page_data["metadata"]["foreign_keys"] = [k.strip() for k in fk_text.split(',') if k.strip()] if fk_text else []
+
+        if not structured_page_data["metadata"].get("table_name"):
+             structured_page_data["metadata"]["table_name"] = page_title_for_struct.replace("Table: ", "").strip()
+        
+        all_expected_primary_table_headers_map = {
+            'Source table': 'source_table', 'Source field name': 'source_field_name', 
+            'Add Source To Target?': 'add_to_target', 'Target Field name': 'target_field_name',
+            'Data type': 'data_type', 'Decode': 'decode', 'ADC Transformation': 'adc_transformation',
+            'Deprecated': 'deprecated', 'Primary Key': 'is_primary_key', 
+            'Definition': 'definition', 'proto file': 'proto_file', 'proto column name': 'proto_column_name',
+            'Comments': 'comments'
+        }
+
+        all_html_tables = soup.find_all('table')
+        if not all_html_tables:
+            print("No tables found on the Confluence page content.")
+            return structured_page_data
+
+        for i, html_table in enumerate(all_html_tables):
+            table_id = f"table_{i+1}"
+            parsed_table_data = {
+                "id": table_id,
+                "columns": []
+            }
+            
+            rows = html_table.find_all('tr')
+            if not rows:
+                print(f"Table {table_id} has no rows. Skipping.")
+                continue
+
+            header_cells = rows[0].find_all(['th', 'td'])
+            actual_headers_raw_cleaned = [clean_text_from_html_basic(cell) for cell in header_cells]
+
+            current_table_headers_mapping_strategy = {}
+            table_type = ""
+
+            if i == 0:
+                table_type = "primary_definitions"
+                current_table_headers_mapping_strategy = {
+                    h_orig: h_std for h_orig, h_std in all_expected_primary_table_headers_map.items()
+                }
+            else:
+                table_type = "dynamic_auxiliary"
+                for h_raw_cleaned in actual_headers_raw_cleaned:
+                    h_cleaned_for_map = h_raw_cleaned.replace(' ', '_').replace('?', '').replace('-', '_').lower()
+                    current_table_headers_mapping_strategy[h_raw_cleaned] = h_cleaned_for_map 
+
+            parsed_table_data["table_type"] = table_type
+
+            header_indices = {}
+            if i == 0:
+                for original_header, standardized_key in all_expected_primary_table_headers_map.items():
+                    try:
+                        header_indices[standardized_key] = actual_headers_raw_cleaned.index(original_header)
+                    except ValueError:
+                        header_indices[standardized_key] = -1
+            else:
+                for col_idx, h_raw_cleaned in enumerate(actual_headers_raw_cleaned):
+                    h_standardized_key = h_raw_cleaned.replace(' ', '_').replace('?', '').replace('-', '_').lower()
+                    header_indices[h_standardized_key] = col_idx
+
+
+            for row in rows[1:]:
+                cols = row.find_all('td')
+                if not cols:
+                    continue
+                
+                column_data = {}
+                keys_to_process = list(current_table_headers_mapping_strategy.values())
+                
+                for standardized_key in keys_to_process:
+                    idx = header_indices.get(standardized_key, -1) 
+                    if idx != -1 and idx < len(cols):
+                        value = clean_text_from_html_basic(cols[idx])
+                        
+                        if standardized_key in ['add_to_target', 'is_primary_key', 'deprecated']:
+                            column_data[standardized_key] = (value.lower() == 'yes')
+                        else:
+                            column_data[standardized_key] = value
+                    else:
+                        if standardized_key in ['add_to_target', 'is_primary_key', 'deprecated']:
+                            column_data[standardized_key] = False
+                        else:
+                            column_data[standardized_key] = ""
+                
+                if i == 0:
+                    if column_data.get('source_field_name') or column_data.get('target_field_name'):
+                        parsed_table_data["columns"].append(column_data)
+                else:
+                    if any(v for k, v in column_data.items() if v not in ["", False, None]):
+                         parsed_table_data["columns"].append(column_data)
+
+            structured_page_data["tables"].append(parsed_table_data)
+            
+        return structured_page_data

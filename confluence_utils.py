@@ -171,10 +171,9 @@ class ConfluencePageParser:
         }
 
     # NEW: Method to fetch ONLY expanded page metadata (no body.storage)
-    def get_expanded_page_metadata(self, page_id): # Renamed
+    def get_expanded_page_metadata(self, page_id):
         """
         Fetches ONLY expanded metadata for a given page ID.
-        Does NOT fetch body.storage content at this stage.
         """
         content_url = f"{self.base_url}/rest/api/content/{page_id}"
         headers = {
@@ -182,7 +181,7 @@ class ConfluencePageParser:
             "Authorization": f"Bearer {self.api_token}"
         }
         params = {
-            "expand": self.EXPAND_METADATA_PARAMS # Use the metadata only expand params
+            "expand": self.EXPAND_METADATA_PARAMS
         }
 
         print(f"Fetching expanded metadata for page ID: {page_id}...")
@@ -191,11 +190,12 @@ class ConfluencePageParser:
         
         data = response.json()
         
-        # Extract desired metadata
         metadata = {
             "api_title": data.get('title'),
             "api_type": data.get('type'),
             "api_status": data.get('status'),
+            # REMOVED: "author_display_name": None, (No longer relevant/populated)
+            # REMOVED: "author_username": None,
         }
 
         history = data.get('history', {})
@@ -210,9 +210,9 @@ class ConfluencePageParser:
             "last_modified_by_display_name": last_updated_by.get('displayName'),
             "last_modified_by_username": last_updated_by.get('username'),
             "last_modified_date": last_updated_when,
-            "parent_page_title": None, # Set default, update if found
+            "parent_page_title": None,
             "parent_page_id": None,
-            "labels": [] 
+            "labels": []
         })
         
         labels_data = data.get('metadata', {}).get('labels', {}).get('results', [])

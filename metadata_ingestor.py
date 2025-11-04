@@ -42,11 +42,11 @@ def calculate_metadata_hash(metadata_dict):
     
     return hashlib.sha256(hash_input.encode('utf-8')).hexdigest()
 
-
 def ingest_confluence_metadata():
     """
     Reads the hit-or-miss report, fetches approved page metadata from Confluence API,
     calculates a hash_id, and stores it in the SQLite database.
+    Updates extraction_status intelligently based on existing state.
     """
     print("\n--- Starting Confluence Metadata Ingestion ---")
 
@@ -82,10 +82,10 @@ def ingest_confluence_metadata():
         space_key=ConfluenceConfig.SPACE_KEY
     )
 
-    for page_entry in approved_pages:
-        page_id = page_entry.get("page_id")
-        given_title = page_entry.get("given_title")
-        found_title = page_entry.get("found_title")
+    for page_entry_from_report in approved_pages: # Renamed for clarity
+        page_id = page_entry_from_report.get("page_id")
+        given_title = page_entry_from_report.get("given_title")
+        found_title = page_entry_from_report.get("found_title")
 
         if not page_id:
             print(f"Skipping '{given_title}': No page_id found in report entry.")
@@ -93,34 +93,59 @@ def ingest_confluence_metadata():
 
         print(f"\nProcessing metadata for approved page: '{found_title}' (ID: {page_id})...")
         
+        # NEW: Fetch existing record from DB to preserve downstream status
+        existing_db_record = db_manager.get_page_metadata(page_id)
+        
         db_metadata = {
             "page_id": page_id,
             "given_title": given_title,
             "found_title": found_title,
-            "page_status": page_entry.get("status"),
-            "user_verified": page_entry.get("user_verified"),
-            "attempts_made": page_entry.get("attempts_made", 0),
-            "first_checked_on": page_entry.get("first_checked_on"),
-            "last_checked_on": page_entry.get("last_checked_on"),
-            "extraction_status": "PENDING_METADATA_INGESTION", # Initial status for this stage
-            "notes": page_entry.get("notes", "")
+            "page_status": page_entry_from_report.get("status"),
+            "user_verified": page_entry_from_report.get("user_verified"),
+            "attempts_made": page_entry_from_report.get("attempts_made", 0),
+            "first_checked_on": page_entry_from_report.get("first_checked_on"),
+            "last_checked_on": datetime.now().isoformat(), # Always update last_checked_on
+            # Initialize hash_id and extraction_status (will be overwritten if API fetch is successful)
+            "hash_id": None,
+            "last_parsed_content_hash": existing_db_record.get('last_parsed_content_hash') if existing_db_record else None,
+            "structured_data_file": existing_db_record.get('structured_data_file') if existing_db_record else None,
+            "notes": page_entry_from_report.get("notes", "")
         }
 
-        try:
-            # Stage 2.1: Fetch ONLY expanded page metadata from Confluence API
-            expanded_api_metadata = confluence_parser.get_expanded_page_metadata(page_id)
-            db_metadata.update(expanded_api_metadata) # Merge expanded API metadata
+        # Preserve existing extraction_status if it indicates a further-downstream success
+        # E.g., if it was PARSED_OK, we don't want to reset it unless hash changes
+        if existing_db_record and existing_db_record.get('extraction_status') == 'PARSED_OK':
+            db_metadata["extraction_status"] = 'PARSED_OK'
+        else:
+            db_metadata["extraction_status"] = 'PENDING_METADATA_INGESTION' # Default if no previous successful state
 
-            # Ensure labels are stored as JSON string in DB
+        try:
+            expanded_api_metadata = confluence_parser.get_expanded_page_metadata(page_id)
+            db_metadata.update(expanded_api_metadata)
+
             if 'labels' in db_metadata and isinstance(db_metadata['labels'], list):
                 db_metadata['labels'] = json.dumps(db_metadata['labels'])
             else:
                 db_metadata['labels'] = json.dumps([])
 
-            # Stage 2.2: Calculate hash_id
-            db_metadata["hash_id"] = calculate_metadata_hash(db_metadata)
-            db_metadata["extraction_status"] = "METADATA_INGESTED"
-            print(f"  Metadata hash_id calculated: {db_metadata['hash_id']}")
+            new_hash_id = calculate_metadata_hash(db_metadata)
+            old_hash_id = existing_db_record.get('hash_id') if existing_db_record else None
+
+            db_metadata["hash_id"] = new_hash_id
+            
+            if old_hash_id is None:
+                print(f"  First time metadata ingested for '{found_title}'. Hash: {new_hash_id}")
+                db_metadata["extraction_status"] = 'METADATA_INGESTED'
+            elif new_hash_id != old_hash_id:
+                print(f"  Metadata changed for '{found_title}'. Old Hash: {old_hash_id}, New Hash: {new_hash_id}")
+                db_metadata["extraction_status"] = 'METADATA_INGESTED' # Signal downstream stage for reprocessing
+            else:
+                print(f"  Metadata unchanged for '{found_title}'. Hash: {new_hash_id}")
+                # Only update status to METADATA_INGESTED if it was previously an error/pending
+                # Otherwise, preserve downstream status like PARSED_OK
+                if db_metadata["extraction_status"] not in ['PARSED_OK', 'DB_FAILED']: # Don't overwrite PARSED_OK or DB_FAILED
+                     db_metadata["extraction_status"] = 'METADATA_INGESTED'
+
             
         except requests.exceptions.HTTPError as e:
             db_metadata["extraction_status"] = "API_FAILED_METADATA"
@@ -138,10 +163,14 @@ def ingest_confluence_metadata():
             print(f"  Metadata for '{found_title}' (ID: {page_id}) stored/updated in DB.")
         except Exception as e:
             print(f"  CRITICAL ERROR: Could not store/update DB metadata for '{found_title}' (ID: {page_id}): {e}")
-            db_metadata["extraction_status"] = "DB_FAILED"
             db_metadata["notes"] += f" | CRITICAL DB STORE ERROR: {e}"
+            # Attempt to update it again with the error status (minimal fields to prevent new errors)
             try:
-                db_manager.insert_or_update_page_metadata(db_metadata)
+                db_manager.insert_or_update_page_metadata({
+                    "page_id": page_id,
+                    "extraction_status": "DB_FAILED",
+                    "notes": db_metadata["notes"] # Use the combined notes
+                })
             except:
                 pass
 
@@ -150,5 +179,3 @@ def ingest_confluence_metadata():
     print("\n--- Confluence Metadata Ingestion Complete ---")
 
 
-if __name__ == "__main__":
-    ingest_confluence_metadata()

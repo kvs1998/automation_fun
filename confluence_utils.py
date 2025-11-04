@@ -242,7 +242,23 @@ class ConfluencePageParser:
             "tables": []
         }
 
+    # MODIFIED: get_structured_data_from_html for full dynamic parsing
+    def get_structured_data_from_html(self, page_id, page_title_for_struct, page_content_html):
+        """
+        Parses the Confluence page content HTML into a structured dictionary of tables and columns.
+        This function now dynamically parses all tables found on the page based on their headers.
+        """
+        soup = BeautifulSoup(page_content_html, 'html.parser')
+        
+        structured_page_data = {
+            "page_title": page_title_for_struct,
+            "page_id": page_id,
+            "metadata": {}, # This will hold table-specific metadata extracted from HTML
+            "tables": []
+        }
+
         # --- Extract Page-Level (table-specific) Metadata from content HTML ---
+        # This part still extracts specific labels IF they exist in the HTML content
         def extract_text_metadata(soup_obj, label):
             tag = soup_obj.find(lambda t: t.name in ['p', 'div', 'h1', 'h2', 'h3'] and label in clean_text_from_html_basic(t))
             if tag:
@@ -265,18 +281,14 @@ class ConfluencePageParser:
         fk_text = extract_text_metadata(soup, "Foreign Keys:")
         structured_page_data["metadata"]["foreign_keys"] = [k.strip() for k in fk_text.split(',') if k.strip()] if fk_text else []
 
+        # Fallback if no table_name found in content
         if not structured_page_data["metadata"].get("table_name"):
              structured_page_data["metadata"]["table_name"] = page_title_for_struct.replace("Table: ", "").strip()
         
-        all_expected_primary_table_headers_map = {
-            'Source table': 'source_table', 'Source field name': 'source_field_name', 
-            'Add Source To Target?': 'add_to_target', 'Target Field name': 'target_field_name',
-            'Data type': 'data_type', 'Decode': 'decode', 'ADC Transformation': 'adc_transformation',
-            'Deprecated': 'deprecated', 'Primary Key': 'is_primary_key', 
-            'Definition': 'definition', 'proto file': 'proto_file', 'proto column name': 'proto_column_name',
-            'Comments': 'comments'
-        }
+        # --- NEW: NO predefined header map ---
+        # all_expected_primary_table_headers_map is removed.
 
+        # --- Extract Table Data (Iterate through all tables, ALL dynamically) ---
         all_html_tables = soup.find_all('table')
         if not all_html_tables:
             print("No tables found on the Confluence page content.")
@@ -286,6 +298,7 @@ class ConfluencePageParser:
             table_id = f"table_{i+1}"
             parsed_table_data = {
                 "id": table_id,
+                "table_type": "dynamically_parsed", # All tables are now dynamic
                 "columns": []
             }
             
@@ -297,64 +310,48 @@ class ConfluencePageParser:
             header_cells = rows[0].find_all(['th', 'td'])
             actual_headers_raw_cleaned = [clean_text_from_html_basic(cell) for cell in header_cells]
 
-            current_table_headers_mapping_strategy = {}
-            table_type = ""
-
-            if i == 0:
-                table_type = "primary_definitions"
-                current_table_headers_mapping_strategy = {
-                    h_orig: h_std for h_orig, h_std in all_expected_primary_table_headers_map.items()
-                }
-            else:
-                table_type = "dynamic_auxiliary"
-                for h_raw_cleaned in actual_headers_raw_cleaned:
-                    h_cleaned_for_map = h_raw_cleaned.replace(' ', '_').replace('?', '').replace('-', '_').lower()
-                    current_table_headers_mapping_strategy[h_raw_cleaned] = h_cleaned_for_map 
-
-            parsed_table_data["table_type"] = table_type
-
+            # --- NEW: Dynamic Header Mapping Strategy for ALL tables ---
+            # Maps raw (but cleaned) header text to standardized (cleaned, lower, underscored) keys
+            current_table_headers_mapping = {}
+            for h_raw_cleaned in actual_headers_raw_cleaned:
+                h_standardized_key = h_raw_cleaned.replace(' ', '_').replace('?', '').replace('-', '_').lower()
+                current_table_headers_mapping[h_raw_cleaned] = h_standardized_key 
+            
+            # Build header_indices: map standardized key to its column index
             header_indices = {}
-            if i == 0:
-                for original_header, standardized_key in all_expected_primary_table_headers_map.items():
-                    try:
-                        header_indices[standardized_key] = actual_headers_raw_cleaned.index(original_header)
-                    except ValueError:
-                        header_indices[standardized_key] = -1
-            else:
-                for col_idx, h_raw_cleaned in enumerate(actual_headers_raw_cleaned):
-                    h_standardized_key = h_raw_cleaned.replace(' ', '_').replace('?', '').replace('-', '_').lower()
-                    header_indices[h_standardized_key] = col_idx
+            for col_idx, h_raw_cleaned in enumerate(actual_headers_raw_cleaned):
+                h_standardized_key = current_table_headers_mapping[h_raw_cleaned]
+                header_indices[h_standardized_key] = col_idx
 
 
-            for row in rows[1:]:
+            for row in rows[1:]: # Skip header row
                 cols = row.find_all('td')
                 if not cols:
                     continue
                 
                 column_data = {}
-                keys_to_process = list(current_table_headers_mapping_strategy.values())
+                keys_to_process = list(current_table_headers_mapping.values()) # Standardized keys
                 
                 for standardized_key in keys_to_process:
                     idx = header_indices.get(standardized_key, -1) 
                     if idx != -1 and idx < len(cols):
                         value = clean_text_from_html_basic(cols[idx])
                         
+                        # Apply boolean conversion for specific known keywords, if they exist
                         if standardized_key in ['add_to_target', 'is_primary_key', 'deprecated']:
                             column_data[standardized_key] = (value.lower() == 'yes')
                         else:
                             column_data[standardized_key] = value
                     else:
+                        # Assign default values for missing columns based on type
                         if standardized_key in ['add_to_target', 'is_primary_key', 'deprecated']:
                             column_data[standardized_key] = False
                         else:
                             column_data[standardized_key] = ""
                 
-                if i == 0:
-                    if column_data.get('source_field_name') or column_data.get('target_field_name'):
-                        parsed_table_data["columns"].append(column_data)
-                else:
-                    if any(v for k, v in column_data.items() if v not in ["", False, None]):
-                         parsed_table_data["columns"].append(column_data)
+                # Append if it has any meaningful data (not all empty strings/falses)
+                if any(v for k, v in column_data.items() if v not in ["", False, None]):
+                     parsed_table_data["columns"].append(column_data)
 
             structured_page_data["tables"].append(parsed_table_data)
             

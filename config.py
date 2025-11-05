@@ -119,3 +119,136 @@ def load_fqdn_map(json_file_path=FilePaths.SOURCE_FQDN_MAP_FILE):
         raise e
     except Exception as e:
         raise Exception(f"An unexpected error occurred reading Source FQDN map file: {e}")
+
+# config.py (Add this to the very end of the file)
+
+# ... (all existing code for classes and functions)
+
+if __name__ == "__main__":
+    print("--- Testing load_fqdn_map function ---")
+
+    # Test Case 1: Valid map with aliases
+    print("\n=== Test Case 1: Valid map with aliases ===")
+    # Create a temporary test JSON file for this case
+    test_valid_json_path = "test_valid_fqdn_map.json"
+    valid_map_content = {
+      "PORTDB.PORTFOLIO_OPS_CANONICAL": {
+        "fqdn": "RAW_DB.CORE.PORTFOLIO_OPS_TABLE",
+        "aliases": ["PORTDB.PORTFOLIO_OPS", "PORTFOLIO_OPS_ALT"]
+      },
+      "ISSUER_TICKER_CANONICAL": {
+        "fqdn": "RAW_DB.CORE.ISSUER_TICKER_TABLE",
+        "aliases": ["ML_ASE.T_ASE_ISSUER_TICKER", "ISSUER_TICKER_VIEW"]
+      }
+    }
+    with open(test_valid_json_path, 'w', encoding='utf-8') as f:
+        json.dump(valid_map_content, f, indent=2)
+    
+    try:
+        # Temporarily override FilePaths.SOURCE_FQDN_MAP_FILE for the test
+        original_map_file = FilePaths.SOURCE_FQDN_MAP_FILE
+        FilePaths.SOURCE_FQDN_MAP_FILE = test_valid_json_path
+
+        test_map = load_fqdn_map()
+        print("Successfully loaded valid map:")
+        for k, v in test_map.items():
+            print(f"  '{k}' -> '{v}'")
+        print("All keys are correctly uppercased.")
+    except Exception as e:
+        print(f"ERROR in Test Case 1 (Valid map): {e}")
+    finally:
+        # Clean up temporary file and restore original path
+        if os.path.exists(test_valid_json_path):
+            os.remove(test_valid_json_path)
+        FilePaths.SOURCE_FQDN_MAP_FILE = original_map_file
+
+
+    # Test Case 2: Duplicate key (different case)
+    print("\n=== Test Case 2: Duplicate key (different case) ===")
+    test_duplicate_case_json_path = "test_duplicate_case_fqdn_map.json"
+    duplicate_case_content = {
+      "PORTDB.PORTFOLIO_OPS_CANONICAL": {
+        "fqdn": "RAW_DB.CORE.TABLE_A",
+        "aliases": []
+      },
+      "portdb.portfolio_ops_canonical": { # Duplicate key, different case
+        "fqdn": "RAW_DB.CORE.TABLE_B",
+        "aliases": []
+      }
+    }
+    with open(test_duplicate_case_json_path, 'w', encoding='utf-8') as f:
+        json.dump(duplicate_case_content, f, indent=2)
+    
+    try:
+        original_map_file = FilePaths.SOURCE_FQDN_MAP_FILE
+        FilePaths.SOURCE_FQDN_MAP_FILE = test_duplicate_case_json_path
+        load_fqdn_map()
+        print("ERROR: Duplicate key (different case) was NOT detected.")
+    except ValueError as e:
+        print(f"SUCCESS: Caught expected error for duplicate key (different case): {e}")
+    except Exception as e:
+        print(f"ERROR in Test Case 2 (Duplicate case): Unexpected error: {e}")
+    finally:
+        if os.path.exists(test_duplicate_case_json_path):
+            os.remove(test_duplicate_case_json_path)
+        FilePaths.SOURCE_FQDN_MAP_FILE = original_map_file
+
+
+    # Test Case 3: Duplicate alias (alias defined twice)
+    print("\n=== Test Case 3: Duplicate alias ===")
+    test_duplicate_alias_json_path = "test_duplicate_alias_fqdn_map.json"
+    duplicate_alias_content = {
+      "CANONICAL_A": {
+        "fqdn": "RAW_DB.A.TABLE",
+        "aliases": ["ALIAS1", "COMMON_ALIAS"]
+      },
+      "CANONICAL_B": {
+        "fqdn": "RAW_DB.B.TABLE",
+        "aliases": ["ALIAS2", "COMMON_ALIAS"] # COMMON_ALIAS points to two FQDNs
+      }
+    }
+    with open(test_duplicate_alias_json_path, 'w', encoding='utf-8') as f:
+        json.dump(duplicate_alias_content, f, indent=2)
+    
+    try:
+        original_map_file = FilePaths.SOURCE_FQDN_MAP_FILE
+        FilePaths.SOURCE_FQDN_MAP_FILE = test_duplicate_alias_json_path
+        load_fqdn_map()
+        print("ERROR: Duplicate alias was NOT detected.")
+    except ValueError as e:
+        print(f"SUCCESS: Caught expected error for duplicate alias: {e}")
+    except Exception as e:
+        print(f"ERROR in Test Case 3 (Duplicate alias): Unexpected error: {e}")
+    finally:
+        if os.path.exists(test_duplicate_alias_json_path):
+            os.remove(test_duplicate_alias_json_path)
+        FilePaths.SOURCE_FQDN_MAP_FILE = original_map_file
+
+
+    # Test Case 4: Missing FQDN in detail
+    print("\n=== Test Case 4: Missing 'fqdn' key ===")
+    test_missing_fqdn_json_path = "test_missing_fqdn_map.json"
+    missing_fqdn_content = {
+      "CANONICAL_X": {
+        "aliases": ["ALIASX"] # Missing 'fqdn' key
+      }
+    }
+    with open(test_missing_fqdn_json_path, 'w', encoding='utf-8') as f:
+        json.dump(missing_fqdn_content, f, indent=2)
+    
+    try:
+        original_map_file = FilePaths.SOURCE_FQDN_MAP_FILE
+        FilePaths.SOURCE_FQDN_MAP_FILE = test_missing_fqdn_json_path
+        load_fqdn_map()
+        print("ERROR: Missing 'fqdn' key was NOT detected.")
+    except ValueError as e:
+        print(f"SUCCESS: Caught expected error for missing 'fqdn' key: {e}")
+    except Exception as e:
+        print(f"ERROR in Test Case 4 (Missing 'fqdn'): Unexpected error: {e}")
+    finally:
+        if os.path.exists(test_missing_fqdn_json_path):
+            os.remove(test_missing_fqdn_json_path)
+        FilePaths.SOURCE_FQDN_MAP_FILE = original_map_file
+
+
+    print("\n--- Testing load_fqdn_map function complete ---")

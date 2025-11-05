@@ -49,73 +49,85 @@ def get_confluence_page_titles(json_file_path=FilePaths.TITLES_JSON_FILE):
 def load_fqdn_map(json_file_path=FilePaths.SOURCE_FQDN_MAP_FILE):
     """
     Loads the source_table to FQDN mapping from a JSON file.
-    The map can now define canonical FQDNs with multiple aliases.
-    It returns a resolved map where keys are all possible uppercase source_table names (canonical or alias)
-    and values are their corresponding FQDNs.
-    Raises ValueError if duplicate keys are found after case conversion or if an alias points to multiple FQDNs.
+    Performs checks for:
+    - Case-sensitive duplicate keys in the raw JSON file.
+    - Missing 'fqdn' key in canonical entries.
+    - Malformed FQDN format.
+    - Case-insensitive alias conflicts.
+    All keys in the final map will be converted to uppercase for case-insensitive matching.
     """
     if not os.path.exists(json_file_path):
         raise FileNotFoundError(f"Source FQDN map file not found at: {json_file_path}")
+    
     try:
-        # Custom hook for case-sensitive duplicate keys in the raw JSON file
-        def _check_for_duplicate_keys_hook(ordered_pairs):
+        # Step 1: Load raw JSON while checking for case-sensitive duplicates
+        # The default json.load(..., object_pairs_hook=...) handles direct duplicates in the file
+        def _raise_on_duplicate_keys(ordered_pairs):
             d = {}
             for k, v in ordered_pairs:
                 if k in d:
-                    raise ValueError(
-                        f"Duplicate key '{k}' found in '{json_file_path}' "
-                        f"(case-sensitive). Please ensure all keys within the JSON "
-                        f"file itself are unique."
-                    )
+                    raise ValueError(f"Duplicate key '{k}' found in '{json_file_path}' (case-sensitive). Please ensure all keys within the JSON file itself are unique.")
                 d[k] = v
             return d
 
         with open(json_file_path, 'r', encoding='utf-8') as f:
-            raw_canonical_map = json.load(f, object_pairs_hook=_check_for_duplicate_keys_hook)
+            raw_canonical_map = json.load(f, object_pairs_hook=_raise_on_duplicate_keys)
             
             if not isinstance(raw_canonical_map, dict):
                 raise ValueError("Source FQDN map file must contain a dictionary of canonical entries.")
             
-            resolved_fqdn_lookup_map = {} # This will be the final map: ALL_POSSIBLE_SOURCE_NAMES_UPPER -> FQDN
+            resolved_fqdn_lookup_map = {} # Final map: ALL_POSSIBLE_SOURCE_NAMES_UPPER -> FQDN_UPPER
             
             for canonical_key_raw, details in raw_canonical_map.items():
-                if not isinstance(details, dict) or 'fqdn' not in details:
-                    raise ValueError(f"Entry for '{canonical_key_raw}' in {json_file_path} is malformed. Expected 'fqdn' key.")
+                if not isinstance(details, dict):
+                    raise ValueError(f"Entry for '{canonical_key_raw}' in {json_file_path} is malformed. Expected a dictionary value.")
+
+                # Step 2: Validate structure and extract FQDN
+                canonical_fqdn_raw = details.get('fqdn')
+                if canonical_fqdn_raw is None: # Check for missing 'fqdn' key
+                    raise ValueError(f"Missing 'fqdn' key for canonical key '{canonical_key_raw}' in {json_file_path}. Each canonical entry must specify its FQDN.")
                 
-                canonical_fqdn = details['fqdn'].upper() # Store FQDN in uppercase for consistency in Snowflake
+                canonical_fqdn_upper = canonical_fqdn_raw.upper()
+                if len(canonical_fqdn_upper.split('.')) != 3: # Check FQDN format
+                     raise ValueError(f"FQDN '{canonical_fqdn_raw}' for canonical key '{canonical_key_raw}' in {json_file_path} is not in DATABASE.SCHEMA.TABLE format.")
+
                 canonical_key_upper = canonical_key_raw.upper()
 
-                # Check if canonical_fqdn has parts (DB.SCHEMA.TABLE)
-                if len(canonical_fqdn.split('.')) != 3:
-                     raise ValueError(f"FQDN '{canonical_fqdn}' for canonical key '{canonical_key_raw}' in {json_file_path} is not in DATABASE.SCHEMA.TABLE format.")
-
-                # 1. Add canonical key itself to the lookup map
-                if canonical_key_upper in resolved_fqdn_lookup_map and resolved_fqdn_lookup_map[canonical_key_upper] != canonical_fqdn:
+                # Step 3: Add canonical key itself to the lookup map
+                if canonical_key_upper in resolved_fqdn_lookup_map:
+                    # This implies a conflict if a canonical key somehow appears twice after being made upper
+                    # (this should have been caught by the initial case-sensitive hook if user typed same)
+                    # This can only happen if two different raw_canonical_map keys resolve to the same upper-case key.
+                    # This check is for the "different case, same key" scenario
                     raise ValueError(
                         f"Alias conflict: Canonical key '{canonical_key_raw}' (resolves to '{canonical_key_upper}') "
-                        f"is attempting to map to multiple FQDNs in '{json_file_path}'."
+                        f"is attempting to map to multiple FQDNs in '{json_file_path}'. "
+                        f"Existing maps to '{resolved_fqdn_lookup_map[canonical_key_upper]}', new maps to '{canonical_fqdn_upper}'."
                     )
-                resolved_fqdn_lookup_map[canonical_key_upper] = canonical_fqdn
+                resolved_fqdn_lookup_map[canonical_key_upper] = canonical_fqdn_upper
 
-                # 2. Add all aliases to the lookup map
+                # Step 4: Add all aliases to the lookup map and check for conflicts
                 aliases = details.get('aliases', [])
                 if not isinstance(aliases, list):
                     raise ValueError(f"Aliases for '{canonical_key_raw}' in {json_file_path} must be a list.")
                 
                 for alias_raw in aliases:
+                    if not isinstance(alias_raw, str):
+                         raise ValueError(f"Alias '{alias_raw}' for '{canonical_key_raw}' in {json_file_path} is not a string.")
                     alias_upper = alias_raw.upper()
-                    if alias_upper in resolved_fqdn_lookup_map and resolved_fqdn_lookup_map[alias_upper] != canonical_fqdn:
+                    
+                    if alias_upper in resolved_fqdn_lookup_map and resolved_fqdn_lookup_map[alias_upper] != canonical_fqdn_upper:
                         raise ValueError(
                             f"Alias conflict: '{alias_raw}' (resolves to '{alias_upper}') "
                             f"is defined as an alias for multiple FQDNs in '{json_file_path}'. "
-                            f"Existing maps to '{resolved_fqdn_lookup_map[alias_upper]}', new maps to '{canonical_fqdn}'."
+                            f"Existing maps to '{resolved_fqdn_lookup_map[alias_upper]}', new maps to '{canonical_fqdn_upper}'."
                         )
-                    resolved_fqdn_lookup_map[alias_upper] = canonical_fqdn
+                    resolved_fqdn_lookup_map[alias_upper] = canonical_fqdn_upper
 
             return resolved_fqdn_lookup_map
     except json.JSONDecodeError as e:
         raise ValueError(f"Error decoding Source FQDN map file: {e}")
-    except ValueError as e:
+    except ValueError as e: # Catch our custom ValueErrors
         raise e
     except Exception as e:
         raise Exception(f"An unexpected error occurred reading Source FQDN map file: {e}")

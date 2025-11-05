@@ -1,4 +1,4 @@
-# ml_table_checker.py (MODIFIED check_and_ingest_ml_source_tables)
+# ml_table_checker.py (REVERTED/MODIFIED check_and_ingest_ml_source_tables)
 
 import os
 import json
@@ -8,8 +8,10 @@ import hashlib
 from config import SnowflakeConfig, FilePaths, load_fqdn_map
 from database_manager import DatabaseManager
 from snowflake_utils import SnowflakeManager
-from confluence_utils import clean_special_characters_iterative # Assuming this is available
+from confluence_utils import clean_special_characters_iterative
 
+
+# REMOVED: is_likely_fqdn helper
 
 def check_and_ingest_ml_source_tables():
     print("\n--- Starting Snowflake ML Source Table Existence Check & DDL Ingestion ---")
@@ -25,43 +27,35 @@ def check_and_ingest_ml_source_tables():
         snowflake_manager.disconnect()
         return
 
-    # A dictionary to store unique FQDNs and the page_ids that reference them
-    fqdns_from_parsed_content = {} # Key: Resolved FQDN, Value: set of page_ids
+    # Collect unique source_table entries from 'table_1' only
+    unique_source_tables_from_db_table1 = set()
 
     try:
         cursor = db_manager.conn.cursor()
         cursor.execute("SELECT page_id, parsed_json FROM confluence_parsed_content")
         
         for row in cursor.fetchall():
-            page_id = row['page_id']
+            # page_id = row['page_id'] # No longer directly needed for ML metadata table
             parsed_content_json_str = row['parsed_json']
             if parsed_content_json_str:
                 parsed_content = json.loads(parsed_content_json_str)
-                # Apply deep cleaning to the loaded JSON from DB
-                cleaned_parsed_content = clean_special_characters_iterative(parsed_content) 
+                cleaned_parsed_content = clean_special_characters_iterative(parsed_content)
 
+                # NEW: Iterate only tables with id 'table_1'
                 for table_data in cleaned_parsed_content.get('tables', []):
-                    # NEW CONDITION: Only process if table_id is 'table_1'
-                    if table_data.get('id') == 'table_1': 
+                    if table_data.get('id') == 'table_1': # Only process 'table_1'
                         for column in table_data.get('columns', []):
                             source_table_raw = column.get('source_table')
                             if source_table_raw and source_table_raw.strip():
-                                source_table_cleaned_upper = source_table_raw.strip().upper() # Standardize to uppercase
-                                
-                                resolved_fqdn = None
-                                # NEW: ALWAYS lookup in fqdn_map
+                                source_table_cleaned_upper = source_table_raw.strip().upper()
+                                # All source_table entries are expected to be keys in fqdn_map
                                 if source_table_cleaned_upper in fqdn_map:
-                                    resolved_fqdn = fqdn_map[source_table_cleaned_upper]
-                                
-                                if resolved_fqdn:
-                                    if resolved_fqdn not in fqdns_from_parsed_content:
-                                        fqdns_from_parsed_content[resolved_fqdn] = set()
-                                    fqdns_from_parsed_content[resolved_fqdn].add(page_id)
+                                    unique_source_tables_from_db_table1.add(source_table_cleaned_upper)
                                 else:
-                                    print(f"WARNING: Source '{source_table_raw}' (from page {page_id}, table_1) not found in FQDN map. Skipping check.")
-                                    
+                                    print(f"WARNING: Source '{source_table_raw}' (from some page) not found in FQDN map. Skipping check for this source.")
+
     except json.JSONDecodeError as e:
-        print(f"ERROR: Invalid JSON in confluence_parsed_content for page ID: {page_id}: {e}")
+        print(f"ERROR: Invalid JSON in confluence_parsed_content for a page: {e}")
         db_manager.disconnect()
         snowflake_manager.disconnect()
         return
@@ -71,27 +65,29 @@ def check_and_ingest_ml_source_tables():
         snowflake_manager.disconnect()
         return
 
-    if not fqdns_from_parsed_content:
-        print("No referenced ML source tables found in the parsed Confluence content (from table_1) to check.")
+    if not unique_source_tables_from_db_table1:
+        print("No source_table entries found in 'table_1's in the parsed Confluence content to check.")
         db_manager.disconnect()
         snowflake_manager.disconnect()
         return
 
-    print(f"Found {len(fqdns_from_parsed_content)} unique ML source FQDNs (from table_1) referenced across pages.")
+    # NEW: Map these sources to their FQDNs for checking
+    fqdns_to_check = {source_key_upper: fqdn_map[source_key_upper] for source_key_upper in unique_source_tables_from_db_table1}
+
+    print(f"Found {len(fqdns_to_check)} unique ML source FQDNs derived from 'table_1's for checking in Snowflake.")
 
     non_existent_ml_tables = []
 
-    for fqdn_value, page_ids_set in fqdns_from_parsed_content.items():
-        print(f"\nChecking FQDN: {fqdn_value} (referenced by pages: {sorted(list(page_ids_set))})...")
+    for source_key_upper, fqdn_value in fqdns_to_check.items():
+        print(f"\nChecking FQDN: {fqdn_value} (mapped from source: {source_key_upper})...")
         
         db_name, schema_name, table_name = fqdn_value.split('.', 2)
         
-        ml_db_entry = { # This dict will be passed to insert_or_update
+        ml_db_entry = {
             "fqdn": fqdn_value,
             "db_name": db_name,
             "schema_name": schema_name,
             "table_name": table_name,
-            "referencing_page_ids": json.dumps(sorted(list(page_ids_set))), # Convert set to sorted list then JSON string
             "notes": ""
         }
         
@@ -99,7 +95,7 @@ def check_and_ingest_ml_source_tables():
             check_result = snowflake_manager.check_table_existence_and_get_ddl(fqdn_value)
             
             ml_db_entry["exists_in_snowflake"] = 1 if check_result["exists"] else 0
-            ml_db_entry["current_extracted_ddl"] = check_result["ddl"] # Store the new DDL
+            ml_db_entry["current_extracted_ddl"] = check_result["ddl"]
             
             if check_result["error"]:
                 ml_db_entry["notes"] += f"Error during check: {check_result['error']}"

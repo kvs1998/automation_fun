@@ -48,16 +48,21 @@ def get_confluence_page_titles(json_file_path=FilePaths.TITLES_JSON_FILE):
 def load_fqdn_map(json_file_path=FilePaths.SOURCE_FQDN_MAP_FILE):
     """
     Loads the source_table to FQDN mapping from a JSON file.
+    All keys in the loaded map will be converted to uppercase for case-insensitive matching.
     """
     if not os.path.exists(json_file_path):
         raise FileNotFoundError(f"Source FQDN map file not found at: {json_file_path}")
     try:
         with open(json_file_path, 'r', encoding='utf-8') as f:
-            fqdn_map = json.load(f)
-            if not isinstance(fqdn_map, dict):
+            raw_fqdn_map = json.load(f)
+            if not isinstance(raw_fqdn_map, dict):
                 raise ValueError("Source FQDN map file must contain a dictionary of key-value pairs.")
+            
+            # NEW: Convert all keys to uppercase for consistent lookup
+            fqdn_map = {k.upper(): v for k, v in raw_fqdn_map.items()}
             return fqdn_map
     except json.JSONDecodeError as e:
         raise ValueError(f"Error decoding Source FQDN map file: {e}")
     except Exception as e:
         raise Exception(f"An unexpected error occurred reading Source FQDN map file: {e}")
+        

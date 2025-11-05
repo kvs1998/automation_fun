@@ -44,37 +44,56 @@ def get_confluence_page_titles(json_file_path=FilePaths.TITLES_JSON_FILE):
     except Exception as e:
         raise Exception(f"An unexpected error occurred reading titles file: {e}")
 
-# NEW: Utility function to load the FQDN map
+# MODIFIED: Utility function to load the FQDN map with both case-sensitive and case-insensitive duplicate checks
 def load_fqdn_map(json_file_path=FilePaths.SOURCE_FQDN_MAP_FILE):
     """
     Loads the source_table to FQDN mapping from a JSON file.
-    All keys in the loaded map will be converted to uppercase for case-insensitive matching.
-    Raises ValueError if duplicate keys are found after case conversion.
+    Performs checks for duplicate keys, both case-sensitive within the JSON file
+    and case-insensitive after standardization.
+    All keys in the final map will be converted to uppercase for case-insensitive matching.
     """
     if not os.path.exists(json_file_path):
         raise FileNotFoundError(f"Source FQDN map file not found at: {json_file_path}")
     try:
+        # Custom hook to check for duplicate keys (case-sensitive) during JSON loading
+        def _check_for_duplicate_keys_hook(ordered_pairs):
+            d = {}
+            for k, v in ordered_pairs:
+                if k in d:
+                    raise ValueError(
+                        f"Duplicate key '{k}' found in '{json_file_path}' "
+                        f"(case-sensitive). Please ensure all keys within the JSON "
+                        f"file itself are unique."
+                    )
+                d[k] = v
+            return d
+
         with open(json_file_path, 'r', encoding='utf-8') as f:
-            raw_fqdn_map = json.load(f)
+            # Load raw map, checking for case-sensitive duplicates first
+            raw_fqdn_map = json.load(f, object_pairs_hook=_check_for_duplicate_keys_hook)
+            
             if not isinstance(raw_fqdn_map, dict):
                 raise ValueError("Source FQDN map file must contain a dictionary of key-value pairs.")
             
+            # Now, convert keys to uppercase and check for case-insensitive duplicates
             fqdn_map = {}
-            for k, v in raw_fqdn_map.items():
-                upper_k = k.upper()
-                if upper_k in fqdn_map:
-                    # NEW: Duplicate check
+            for k_raw, v in raw_fqdn_map.items():
+                k_upper = k_raw.upper()
+                if k_upper in fqdn_map:
+                    # This catches duplicates like "Key" and "key" after conversion
+                    # (though _check_for_duplicate_keys_hook should already handle "Key" and "Key")
                     raise ValueError(
-                        f"Duplicate key '{k}' (after case conversion to '{upper_k}') "
+                        f"Duplicate key '{k_raw}' (after case conversion to '{k_upper}') "
                         f"found in '{json_file_path}'. Please ensure all keys are unique "
                         f"when compared case-insensitively."
                     )
-                fqdn_map[upper_k] = v
+                fqdn_map[k_upper] = v
             return fqdn_map
     except json.JSONDecodeError as e:
+        # json.decoder.JSONDecodeError itself handles basic syntax errors
+        # If _check_for_duplicate_keys_hook raises ValueError, it will be caught below
         raise ValueError(f"Error decoding Source FQDN map file: {e}")
-    except ValueError as e: # Catch our custom ValueError
+    except ValueError as e: # Catch our custom ValueError from the hook or post-processing
         raise e
     except Exception as e:
         raise Exception(f"An unexpected error occurred reading Source FQDN map file: {e}")
-        

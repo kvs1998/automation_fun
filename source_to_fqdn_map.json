@@ -1,0 +1,7 @@
+{
+  "MY_CANONICAL_TABLE_NAME": {
+    "fqdn": "..",
+    "aliases": ["ML_ASE.", ""]
+  }
+  // ... other entries
+}

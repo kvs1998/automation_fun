@@ -10,6 +10,7 @@ def validate_source_to_fqdn_map(db_file=None):
     """
     Compares source_table entries from parsed Confluence content in the DB
     against the source_to_fqdn_map.json file.
+    Performs case-insensitive matching by standardizing to uppercase.
     
     Returns:
         dict: A dictionary containing:
@@ -20,27 +21,25 @@ def validate_source_to_fqdn_map(db_file=None):
     print("\n--- Starting Source to FQDN Map Validation ---")
 
     db_manager = DatabaseManager(db_file)
-    fqdn_map = load_fqdn_map() # Load your FQDN mapping
+    fqdn_map = load_fqdn_map() # Loads map with keys already in uppercase
 
-    # 1. Get all unique source_table entries from confluence_parsed_content
     unique_source_tables_from_db = set()
     try:
         cursor = db_manager.conn.cursor()
-        # Query confluence_parsed_content
         cursor.execute("SELECT parsed_json FROM confluence_parsed_content")
         
         for row in cursor.fetchall():
             parsed_content_json_str = row['parsed_json']
             if parsed_content_json_str:
                 parsed_content = json.loads(parsed_content_json_str)
-                # Apply cleaning to the loaded JSON just in case (though should be clean from data_parser)
                 cleaned_parsed_content = clean_special_characters_iterative(parsed_content)
 
                 for table_data in cleaned_parsed_content.get('tables', []):
                     for column in table_data.get('columns', []):
                         source_table = column.get('source_table')
                         if source_table and source_table.strip():
-                            unique_source_tables_from_db.add(source_table.strip())
+                            # NEW: Convert extracted source_table to uppercase for lookup
+                            unique_source_tables_from_db.add(source_table.strip().upper())
     except json.JSONDecodeError as e:
         print(f"ERROR: Invalid JSON in confluence_parsed_content: {e}")
         db_manager.disconnect()
@@ -57,21 +56,20 @@ def validate_source_to_fqdn_map(db_file=None):
     mapped_sources = []
     unmapped_sources = []
     
-    # Compare with fqdn_map
-    for source_table in unique_source_tables_from_db:
-        if source_table in fqdn_map:
-            mapped_sources.append(source_table)
+    # Compare with fqdn_map (keys are already uppercase)
+    for source_table_upper in unique_source_tables_from_db:
+        if source_table_upper in fqdn_map:
+            mapped_sources.append(source_table_upper)
         else:
-            unmapped_sources.append(source_table)
+            unmapped_sources.append(source_table_upper)
     
     # Optional: Find FQDNs in map that are not referenced in the DB (for cleanup)
-    referenced_fqdns = {fqdn_map[s] for s in mapped_sources}
+    # The keys in fqdn_map are already uppercase
     unused_fqdns_in_map = []
-    for source_key, fqdn_value in fqdn_map.items():
-        # Check if the map key itself is present in the source tables from DB
-        # AND if its FQDN value is not in the set of actually used FQDNs
-        if source_key not in unique_source_tables_from_db and fqdn_value not in referenced_fqdns:
-            unused_fqdns_in_map.append(f"{source_key} -> {fqdn_value}")
+    for source_key_upper, fqdn_value in fqdn_map.items():
+        # Check if the map key itself is present in the source tables from DB (all uppercase)
+        if source_key_upper not in unique_source_tables_from_db: # Use source_key_upper here
+            unused_fqdns_in_map.append(f"{source_key_upper} -> {fqdn_value}")
     
     validation_results = {
         'mapped_sources': sorted(mapped_sources),
@@ -81,14 +79,14 @@ def validate_source_to_fqdn_map(db_file=None):
 
     print("\n--- FQDN Map Validation Results ---")
     print(f"Mapped Source Tables ({len(validation_results['mapped_sources'])}):")
-    for s in validation_results['mapped_sources']:
-        print(f"  - {s} -> {fqdn_map[s]}")
+    for s_upper in validation_results['mapped_sources']:
+        print(f"  - {s_upper} -> {fqdn_map[s_upper]}") # Lookup with uppercase key
 
     if validation_results['unmapped_sources']:
         print(f"\nUNMAPPED Source Tables ({len(validation_results['unmapped_sources'])}):")
-        print("ACTION REQUIRED: Please add these entries to source_to_fqdn_map.json.")
-        for s in validation_results['unmapped_sources']:
-            print(f"  - {s}")
+        print("ACTION REQUIRED: Please add these entries (in uppercase) to source_to_fqdn_map.json.")
+        for s_upper in validation_results['unmapped_sources']:
+            print(f"  - {s_upper}")
     else:
         print("\nAll source_table entries found in the database are successfully mapped!")
     
@@ -100,7 +98,7 @@ def validate_source_to_fqdn_map(db_file=None):
 
     print("\n--- FQDN Map Validation Complete ---")
     return validation_results
-
+    
 # Example usage (for testing this utility independently)
 if __name__ == "__main__":
     # Ensure you have a populated confluence_metadata.db and source_to_fqdn_map.json

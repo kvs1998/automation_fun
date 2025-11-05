@@ -11,6 +11,11 @@ from snowflake_utils import SnowflakeManager
 from confluence_utils import clean_special_characters_iterative
 
 
+# REMOVED: is_likely_fqdn helper - no longer needed with alias map
+# REMOVED: is_likely_fqdn helper from this file. It was never actually used here,
+#          only in ddl_utils and now the map handles resolution.
+
+
 def check_and_ingest_ml_source_tables():
     print("\n--- Starting Snowflake ML Source Table Existence Check & DDL Ingestion ---")
 
@@ -18,27 +23,22 @@ def check_and_ingest_ml_source_tables():
     snowflake_manager = SnowflakeManager()
     
     try:
-        fqdn_map = load_fqdn_map() # Load the map (keys are uppercase)
+        # Load the unified map: SOURCE_NAME_UPPER -> FQDN_UPPER
+        fqdn_lookup_map = load_fqdn_map() 
     except Exception as e:
         print(f"ERROR: Failed to load FQDN map: {e}")
         db_manager.disconnect()
         snowflake_manager.disconnect()
         return
 
-    # NEW: Collect unique source_table entries for mapping validation
-    unique_sources_from_content = set() # All source_tables from 'table_1' in content
-    
-    # NEW: Store FQDNs that are *resolved* (either directly or via map)
-    # This will be used to ensure we only check each unique FQDN once
-    resolved_fqdns_for_checking = set() 
+    # Collect unique source_table entries from 'table_1' only
+    unique_source_names_from_content = set() # All source_tables from 'table_1' in content
 
-    # --- Phase 1: Collect and Resolve all unique source_table entries from parsed content ---
     try:
         cursor = db_manager.conn.cursor()
-        cursor.execute("SELECT page_id, parsed_json FROM confluence_parsed_content")
+        cursor.execute("SELECT parsed_json FROM confluence_parsed_content")
         
         for row in cursor.fetchall():
-            # page_id = row['page_id'] # Not used in this iteration
             parsed_content_json_str = row['parsed_json']
             if parsed_content_json_str:
                 parsed_content = json.loads(parsed_content_json_str)
@@ -50,7 +50,7 @@ def check_and_ingest_ml_source_tables():
                             source_table_raw = column.get('source_table')
                             if source_table_raw and source_table_raw.strip():
                                 source_table_cleaned_upper = source_table_raw.strip().upper()
-                                unique_sources_from_content.add(source_table_cleaned_upper)
+                                unique_source_names_from_content.add(source_table_cleaned_upper)
     except json.JSONDecodeError as e:
         print(f"ERROR: Invalid JSON in confluence_parsed_content for a page: {e}")
         db_manager.disconnect()
@@ -62,24 +62,22 @@ def check_and_ingest_ml_source_tables():
         snowflake_manager.disconnect()
         return
 
-    # --- Phase 2: Resolve sources to FQDNs and identify unmapped ones ---
-    unmapped_source_names = set() # Collect these for a single warning report later
-    fqdns_to_check_in_snowflake = {} # Key: source_table_upper, Value: resolved FQDN
+    # Resolve collected source names to their FQDNs
+    # And track any that couldn't be resolved
+    resolved_fqdns_for_checking = set() # The final unique FQDNs to check in Snowflake
+    unresolved_source_names = set()      # Source names from content that didn't map to an FQDN
 
-    for source_name_upper in unique_sources_from_content:
-        if source_name_upper in fqdn_map:
-            resolved_fqdn = fqdn_map[source_name_upper]
-            # Add to set of resolved FQDNs that will be checked in Snowflake
-            resolved_fqdns_for_checking.add(resolved_fqdn)
-            fqdns_to_check_in_snowflake[source_name_upper] = resolved_fqdn
+    for source_name_upper in unique_source_names_from_content:
+        if source_name_upper in fqdn_lookup_map:
+            resolved_fqdns_for_checking.add(fqdn_lookup_map[source_name_upper])
         else:
-            unmapped_source_names.add(source_name_upper) # Collect for single report
+            unresolved_source_names.add(source_name_upper)
 
-    # --- Print warnings for all unique unmapped sources once ---
-    if unmapped_source_names:
-        print("\nWARNING: The following source_table entries from Confluence content (table_1) were NOT found in FQDN map:")
-        print("ACTION REQUIRED: Please add these entries (in uppercase) to source_to_fqdn_map.json.")
-        for src in sorted(list(unmapped_source_names)):
+    # --- Print warnings for all unique unresolved sources once ---
+    if unresolved_source_names:
+        print("\nWARNING: The following source_table entries from Confluence content (table_1) were NOT resolved to an FQDN:")
+        print("ACTION REQUIRED: Please add these entries (as canonical or alias) to source_to_fqdn_map.json.")
+        for src in sorted(list(unresolved_source_names)):
             print(f"  - '{src}'")
     
     if not resolved_fqdns_for_checking:
@@ -92,15 +90,13 @@ def check_and_ingest_ml_source_tables():
 
     non_existent_ml_tables = []
 
-    # --- Phase 3: Check each unique resolved FQDN in Snowflake and ingest to DB ---
-    for fqdn_value in sorted(list(resolved_fqdns_for_checking)): # Iterate unique FQDNs directly
+    for fqdn_value in sorted(list(resolved_fqdns_for_checking)):
         print(f"\nChecking FQDN: {fqdn_value}...")
         
-        # Split FQDN
         parts = fqdn_value.split('.')
-        if len(parts) != 3: # Basic validation for FQDN structure
-            print(f"  ERROR: FQDN '{fqdn_value}' is not in the expected DATABASE.SCHEMA.TABLE format. Skipping.")
-            continue # Skip this FQDN if malformed
+        if len(parts) != 3:
+            print(f"  ERROR: Resolved FQDN '{fqdn_value}' is not in the expected DATABASE.SCHEMA.TABLE format. Skipping.")
+            continue
             
         db_name, schema_name, table_name = parts[0], parts[1], parts[2]
         
@@ -110,7 +106,6 @@ def check_and_ingest_ml_source_tables():
             "schema_name": schema_name,
             "table_name": table_name,
             "notes": ""
-            # last_checked_on is added below
         }
         
         try:
@@ -126,14 +121,12 @@ def check_and_ingest_ml_source_tables():
                 non_existent_ml_tables.append(fqdn_value)
                 ml_db_entry["notes"] += " | Table does not exist in Snowflake."
             
-            # FIX: Ensure last_checked_on is ALWAYS present in the dictionary passed to DB Manager
             ml_db_entry["last_checked_on"] = datetime.now().isoformat()
 
         except Exception as e:
             ml_db_entry["exists_in_snowflake"] = 0
             ml_db_entry["current_extracted_ddl"] = None
             ml_db_entry["notes"] += f" | Critical error during Snowflake check: {e}"
-            # FIX: Ensure last_checked_on is still set even on error, so it's not NULL
             ml_db_entry["last_checked_on"] = datetime.now().isoformat()
             print(f"  ERROR: Critical error checking {fqdn_value}: {e}")
 

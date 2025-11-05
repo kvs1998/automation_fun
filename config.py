@@ -49,6 +49,7 @@ def load_fqdn_map(json_file_path=FilePaths.SOURCE_FQDN_MAP_FILE):
     """
     Loads the source_table to FQDN mapping from a JSON file.
     All keys in the loaded map will be converted to uppercase for case-insensitive matching.
+    Raises ValueError if duplicate keys are found after case conversion.
     """
     if not os.path.exists(json_file_path):
         raise FileNotFoundError(f"Source FQDN map file not found at: {json_file_path}")
@@ -58,11 +59,22 @@ def load_fqdn_map(json_file_path=FilePaths.SOURCE_FQDN_MAP_FILE):
             if not isinstance(raw_fqdn_map, dict):
                 raise ValueError("Source FQDN map file must contain a dictionary of key-value pairs.")
             
-            # NEW: Convert all keys to uppercase for consistent lookup
-            fqdn_map = {k.upper(): v for k, v in raw_fqdn_map.items()}
+            fqdn_map = {}
+            for k, v in raw_fqdn_map.items():
+                upper_k = k.upper()
+                if upper_k in fqdn_map:
+                    # NEW: Duplicate check
+                    raise ValueError(
+                        f"Duplicate key '{k}' (after case conversion to '{upper_k}') "
+                        f"found in '{json_file_path}'. Please ensure all keys are unique "
+                        f"when compared case-insensitively."
+                    )
+                fqdn_map[upper_k] = v
             return fqdn_map
     except json.JSONDecodeError as e:
         raise ValueError(f"Error decoding Source FQDN map file: {e}")
+    except ValueError as e: # Catch our custom ValueError
+        raise e
     except Exception as e:
         raise Exception(f"An unexpected error occurred reading Source FQDN map file: {e}")
         

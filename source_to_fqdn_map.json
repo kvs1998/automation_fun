@@ -1,7 +1,56 @@
 {
-  "MY_CANONICAL_TABLE_NAME": {
-    "fqdn": "..",
-    "aliases": ["ML_ASE.", ""]
+  "PORTDB.PORTFOLIO_OPS_CANONICAL": {
+    "aliases": ["PORTDB.PORTFOLIO_OPS", "PORTFOLIO_OPS_ALT"],
+    "defaults": { # NEW: Environments using this default FQDN/type
+      "environments": ["DEV", "QA", "PREPOD", "TRAINING"], # List of env names
+      "fqdn": "EDP_ML_DB.ML_ALDN_PORTDB.PORTFOLIO_OPS_COMMON",
+      "object_type": "TABLE"
+    },
+    "specific_environments": { # NEW: Override defaults for specific environments
+      "PROD": {
+        "fqdn": "PROD_RAW_DB.BUS_SCHEMA.PORTFOLIO_TABLE_PROD",
+        "object_type": "TABLE"
+      },
+      "DR": { # Disaster Recovery environment
+        "fqdn": "DR_RAW_DB.DR_SCHEMA.DR_PORTFOLIO",
+        "object_type": "TABLE"
+      }
+    }
+  },
+  "ISSUER_TICKER_CANONICAL": {
+    "aliases": ["ML_ASE.T_ASE_ISSUER_TICKER", "ISSUER_MASTER_VIEW"],
+    "defaults": {
+      "environments": ["DEV", "QA", "PREPOD"],
+      "fqdn": "EDP_ML_DB.ML_ALDN_GLOBALDB.ISSUER_TICKER_COMMON",
+      "object_type": "VIEW"
+    },
+    "specific_environments": {
+      "PROD": {
+        "fqdn": "PROD_METADATA.REF.ISSUER_IDENTIFIERS_PROD",
+        "object_type": "TABLE"
+      },
+      "UAT": { # User Acceptance Testing
+        "fqdn": "UAT_RAW.UAT_REF.ISSUER_IDENTIFIERS_UAT",
+        "object_type": "TABLE"
+      }
+    }
+  },
+  "ADMROLE_CANONICAL": {
+    "aliases": ["ADMROLE"],
+    "defaults": {
+      "environments": ["DEV", "SPC", "BFM", "PRU"], # Or whatever group of environments use this default
+      "fqdn": "RAW_DB.APP.ADMROLE_COMMON_DEFAULT",
+      "object_type": "TABLE"
+    },
+    "specific_environments": {
+      "PROD": {
+        "fqdn": "PROD_DB.APP.ADMROLE_PROD",
+        "object_type": "TABLE"
+      },
+      "ELD": { # Example: ELD has a special FQDN too
+        "fqdn": "ELD_APP.SECURITY.ADMROLE_ELD",
+        "object_type": "VIEW"
+      }
+    }
   }
-  // ... other entries
 }

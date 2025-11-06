@@ -1,0 +1,21 @@
+-  Using Default Config File (e.g., DEV vs. DEV, all objects):
+python ml_ddl_change_reporter.py (This will load default_ml_ddl_report_args.json)
+
+- Using a Custom Config File (e.g., for DEV vs. PROD, specific FQDNs):
+First, create my_custom_report_config.json:
+	{
+	  "source_env": "DEV",
+	  "target_env": "PROD",
+	  "objects": [
+	    "EDP_ML_DB.ML_ALDN_PORTDB.PORTFOLIO_OPS",
+	    "EDP_ML_DB.ML_ALDN_GLOBALDB.ISSUER_TICKER"
+	  ],
+	  "output_filename": "dev_vs_prod_critical_tables_report.md"
+	}
+Then run:
+python ml_ddl_change_reporter.py --config_file my_custom_report_config.json
+
+
+
+- Help:
+python ml_ddl_change_reporter.py --help

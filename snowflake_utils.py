@@ -1,5 +1,4 @@
-# snowflake_utils.py (MODIFIED SnowflakeManager)
-
+# snowflake_utils.py
 import snowflake.connector
 from config import load_snowflake_env_credentials # NEW: Import for dynamic creds
 from datetime import datetime
@@ -116,9 +115,10 @@ class SnowflakeManager:
             "error": error_notes,
             "db_name": db_name,
             "schema_name": schema_name,
-            "table_name": object_name # Changed from table_name to object_name
+            "table_name": object_name
         }
     
+    # NEW METHOD: Discover all tables and views within a given DB/Schema pattern
     def get_all_tables_and_views_in_pattern(self, db_pattern='%', schema_pattern='%'):
         """
         Discovers all tables and views in Snowflake for the connected environment
@@ -166,7 +166,7 @@ if __name__ == "__main__":
     try:
         sf_manager_dev = SnowflakeManager(environment_name="DEV")
         
-        # Test existence and DDL for a known table/view
+        # Replace with an actual FQDN you expect to exist or not exist
         test_fqdn_table = "YOUR_DEV_DB.YOUR_DEV_SCHEMA.YOUR_DEV_TABLE" 
         test_fqdn_view = "YOUR_DEV_DB.YOUR_DEV_SCHEMA.YOUR_DEV_VIEW"
         

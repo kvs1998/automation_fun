@@ -77,22 +77,27 @@ class DatabaseManager:
 
         sql_create_snowflake_ml_source_table = f"""
         CREATE TABLE IF NOT EXISTS {FilePaths.SNOWFLAKE_ML_SOURCE_TABLE} (
-            fqdn TEXT PRIMARY KEY,
+            fqdn TEXT NOT NULL,
+            environment TEXT NOT NULL,          -- NEW: e.g., 'DEV', 'PREPOD', 'PROD'
+            object_type TEXT NOT NULL,          -- NEW: e.g., 'TABLE', 'VIEW', 'ML_MODEL_TABLE'
+            
             db_name TEXT NOT NULL,
             schema_name TEXT NOT NULL,
             table_name TEXT NOT NULL,
-            exists_in_snowflake INTEGER NOT NULL DEFAULT 0, -- 0 for FALSE, 1 for TRUE
+            exists_in_snowflake INTEGER NOT NULL DEFAULT 0,
             
-            current_ddl_hash TEXT,                  -- NEW: Hash of the latest extracted DDL
-            current_extracted_ddl TEXT,             -- NEW: The latest CREATE TABLE DDL
-            last_ddl_extracted_on TEXT NOT NULL,    -- NEW: When current DDL was last extracted
+            current_ddl_hash TEXT,
+            current_extracted_ddl TEXT,
+            last_ddl_extracted_on TEXT,
 
-            previous_ddl_hash TEXT,                 -- NEW: Hash of the DDL seen in the prior run (if different)
-            previous_extracted_ddl TEXT,            -- NEW: The DDL seen in the prior run (if different)
-            ddl_changed_on TEXT,                    -- NEW: Timestamp when the DDL hash last changed
+            previous_ddl_hash TEXT,
+            previous_extracted_ddl TEXT,
+            ddl_changed_on TEXT,
 
-            last_checked_on TEXT NOT NULL,          -- Timestamp of the overall existence/DDL check
-            notes TEXT
+            last_checked_on TEXT NOT NULL,
+            notes TEXT,
+
+            PRIMARY KEY (fqdn, environment, object_type) -- NEW: Composite Primary Key
         );
         """
         try:
@@ -183,20 +188,24 @@ class DatabaseManager:
         return columns
 
 
-    # MODIFIED METHOD: For inserting/updating Snowflake ML source metadata
+    # MODIFIED METHOD: insert_or_update_snowflake_ml_metadata for composite PK
     def insert_or_update_snowflake_ml_metadata(self, ml_metadata_dict):
         """
         Inserts or updates a Snowflake ML source table metadata record.
         Handles current/previous DDL logic.
+        Uses a composite primary key (fqdn, environment, object_type).
         """
         table_name = FilePaths.SNOWFLAKE_ML_SOURCE_TABLE
-        columns = self._get_table_columns(table_name) # Get actual columns from DB
+        columns = self._get_table_columns(table_name)
         
-        if 'fqdn' not in ml_metadata_dict or ml_metadata_dict['fqdn'] is None:
-            raise ValueError("FQDN must be provided for insert/update operations.")
+        # Ensure all parts of the composite key are present
+        if not all(k in ml_metadata_dict and ml_metadata_dict[k] is not None for k in ['fqdn', 'environment', 'object_type']):
+            raise ValueError("FQDN, environment, and object_type must be provided for insert/update operations.")
+
+        composite_key_values = (ml_metadata_dict['fqdn'], ml_metadata_dict['environment'], ml_metadata_dict['object_type'])
 
         cursor = self.conn.cursor()
-        cursor.execute(f"SELECT * FROM {table_name} WHERE fqdn = ?", (ml_metadata_dict['fqdn'],))
+        cursor.execute(f"SELECT * FROM {table_name} WHERE fqdn = ? AND environment = ? AND object_type = ?", composite_key_values)
         existing_record = cursor.fetchone()
         
         current_timestamp = datetime.now().isoformat()
@@ -208,13 +217,12 @@ class DatabaseManager:
             old_current_ddl_hash = existing_record['current_ddl_hash']
             
             if new_ddl_hash and new_ddl_hash != old_current_ddl_hash:
-                print(f"  DDL Change Detected for {ml_metadata_dict['fqdn']}!")
+                print(f"  DDL Change Detected for {ml_metadata_dict['fqdn']} in {ml_metadata_dict['environment']} ({ml_metadata_dict['object_type']})!")
                 ml_metadata_dict['previous_ddl_hash'] = old_current_ddl_hash
                 ml_metadata_dict['previous_extracted_ddl'] = existing_record['current_extracted_ddl']
                 ml_metadata_dict['ddl_changed_on'] = current_timestamp
             elif existing_record['exists_in_snowflake'] == 0 and ml_metadata_dict['exists_in_snowflake'] == 1:
-                 # Special case: Table just started existing, record ddl_changed_on
-                 print(f"  Table {ml_metadata_dict['fqdn']} now exists in Snowflake!")
+                 print(f"  {ml_metadata_dict['object_type']} {ml_metadata_dict['fqdn']} now exists in Snowflake {ml_metadata_dict['environment']}!")
                  ml_metadata_dict['ddl_changed_on'] = current_timestamp
             else:
                 ml_metadata_dict['previous_ddl_hash'] = existing_record['previous_ddl_hash']
@@ -223,45 +231,42 @@ class DatabaseManager:
             
             ml_metadata_dict['current_ddl_hash'] = new_ddl_hash
             ml_metadata_dict['current_extracted_ddl'] = new_ddl
-            ml_metadata_dict['last_ddl_extracted_on'] = current_timestamp
+            ml_metadata_dict['last_ddl_extracted_on'] = current_timestamp if new_ddl else None
             
             ml_metadata_dict['last_checked_on'] = current_timestamp
 
-            # Ensure all relevant fields are present or defaulted before update
-            # Filter the incoming dict to only include keys that are actual columns in the table
-            final_update_dict = {k: ml_metadata_dict.get(k) for k in columns if k != 'fqdn'}
+            final_update_dict = {k: ml_metadata_dict.get(k) for k in columns if k not in ['fqdn', 'environment', 'object_type']}
             update_cols = ", ".join([f"{col} = ?" for col in final_update_dict.keys()])
             update_values = list(final_update_dict.values())
-            update_values.append(ml_metadata_dict['fqdn'])
+            update_values.extend(composite_key_values) # Add composite key values for WHERE clause
             
-            sql = f"UPDATE {table_name} SET {update_cols} WHERE fqdn = ?"
+            sql = f"UPDATE {table_name} SET {update_cols} WHERE fqdn = ? AND environment = ? AND object_type = ?"
             cursor.execute(sql, tuple(update_values))
-            print(f"Updated Snowflake ML source metadata for FQDN: {ml_metadata_dict['fqdn']}")
+            print(f"Updated ML source metadata for FQDN: {ml_metadata_dict['fqdn']} in {ml_metadata_dict['environment']}")
         else:
-            new_ddl = ml_metadata_dict.get('current_extracted_ddl')
-            ml_metadata_dict['current_ddl_hash'] = hashlib.sha256(new_ddl.encode('utf-8')).hexdigest() if new_ddl else None
-            ml_metadata_dict['last_ddl_extracted_on'] = current_timestamp if new_ddl else None
-            ml_metadata_dict['ddl_changed_on'] = current_timestamp
+            ml_metadata_dict['current_ddl_hash'] = hashlib.sha256(ml_metadata_dict['current_extracted_ddl'].encode('utf-8')).hexdigest() if ml_metadata_dict.get('current_extracted_ddl') else None
+            ml_metadata_dict['last_ddl_extracted_on'] = current_timestamp if ml_metadata_dict.get('current_extracted_ddl') else None
+            ml_metadata_dict['ddl_changed_on'] = current_timestamp # First seen, so considered changed
 
             ml_metadata_dict['previous_ddl_hash'] = None
             ml_metadata_dict['previous_extracted_ddl'] = None
+            ml_metadata_dict['last_checked_on'] = current_timestamp # Set for new records too
 
-            # Filter the incoming dict to only include keys that are actual columns in the table
-            insert_cols = [col for col in columns if col != 'fqdn']
+            insert_cols = [col for col in columns] # Insert all columns
             placeholders = ", ".join(["?" for _ in insert_cols])
             insert_values = [ml_metadata_dict.get(col) for col in insert_cols]
             
-            sql = f"INSERT INTO {table_name} (fqdn, {', '.join(insert_cols)}) VALUES (?, {placeholders})"
+            sql = f"INSERT INTO {table_name} ({', '.join(insert_cols)}) VALUES ({placeholders})"
             cursor.execute(sql, (ml_metadata_dict['fqdn'],) + tuple(insert_values))
-            print(f"Inserted Snowflake ML source metadata for FQDN: {ml_metadata_dict['fqdn']}")
+            print(f"Inserted ML source metadata for FQDN: {ml_metadata_dict['fqdn']} in {ml_metadata_dict['environment']}")
         
         self.conn.commit()
 
     # NEW METHOD: To retrieve existing ML metadata for context
-    def get_snowflake_ml_metadata(self, fqdn):
-        """Retrieves a single ML table's metadata by FQDN."""
+    def get_snowflake_ml_metadata(self, fqdn, environment, object_type):
+        """Retrieves a single ML table's metadata by FQDN, environment, and object_type."""
         cursor = self.conn.cursor()
-        cursor.execute(f"SELECT * FROM {FilePaths.SNOWFLAKE_ML_SOURCE_TABLE} WHERE fqdn = ?", (fqdn,))
+        cursor.execute(f"SELECT * FROM {FilePaths.SNOWFLAKE_ML_SOURCE_TABLE} WHERE fqdn = ? AND environment = ? AND object_type = ?", (fqdn, environment, object_type))
         row = cursor.fetchone()
         return dict(row) if row else None
         

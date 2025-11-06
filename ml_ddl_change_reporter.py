@@ -1,24 +1,37 @@
-# ml_ddl_change_reporter.py
+# ml_ddl_change_reporter.py (MODIFIED to always compare by FQDN)
+
 import os
 import json
-import argparse # NEW: For command-line arguments
+import argparse
 from datetime import datetime
-import difflib # NEW: For generating DDL diffs
+import difflib
 
 from config import CHECK_ENVIRONMENTS, DEPLOYMENT_ENVIRONMENT, FilePaths, load_fqdn_resolver
 from database_manager import DatabaseManager
 
 
-def generate_ml_ddl_change_report(source_env="DEV", target_env="DEV"):
+def generate_ml_ddl_change_report(
+    source_env="DEV",
+    target_env="DEV",
+    objects_to_compare=None # List of FQDNs to specifically compare
+):
     """
     Generates a report comparing ML DDLs across environments and
     flags internal DDL changes.
+    Comparison is always performed by FQDN.
     
     Args:
         source_env (str): The environment to use as the primary comparison source.
-        target_env (str): The environment to compare against the source.
+        target_env (str): The environment to compare against the target.
+        objects_to_compare (list, optional): A list of FQDNs (e.g., ["DB.SCH.TABLE1", "DB.SCH.TABLE2"])
+                                            to limit the report to. If None, all objects are included.
     """
     print("\n--- Starting ML DDL Change Report Generation ---")
+    print(f"Comparison Parameters: Source Env='{source_env.upper()}', Target Env='{target_env.upper()}'")
+    if objects_to_compare:
+        print(f"  Filtering for specific FQDNs: {', '.join(objects_to_compare)}\n")
+    else:
+        print("  Including all available FQDNs.\n")
 
     # Validate provided environments
     if source_env.upper() not in CHECK_ENVIRONMENTS:
@@ -27,17 +40,27 @@ def generate_ml_ddl_change_report(source_env="DEV", target_env="DEV"):
     if target_env.upper() not in CHECK_ENVIRONMENTS:
         print(f"ERROR: Target environment '{target_env}' is not defined in CHECK_ENVIRONMENTS in config.py.")
         return
-
+    
     db_manager = DatabaseManager()
     
     # --- 1. Retrieve all ML DDL metadata ---
     cursor = db_manager.conn.cursor()
-    cursor.execute(f"SELECT * FROM {FilePaths.SNOWFLAKE_ML_SOURCE_TABLE} WHERE exists_in_snowflake = 1") # Only consider existing objects
+    query_params = []
+    where_clause = ""
+    if objects_to_compare:
+        uppercased_objects = [obj.upper() for obj in objects_to_compare] 
+        placeholders = ','.join(['?' for _ in uppercased_objects])
+        where_clause = f" WHERE fqdn IN ({placeholders})"
+        query_params.extend(uppercased_objects)
+        
+    # Always filter by exists_in_snowflake = 1 for comparison
+    cursor.execute(f"SELECT * FROM {FilePaths.SNOWFLAKE_ML_SOURCE_TABLE}{where_clause} AND exists_in_snowflake = 1", tuple(query_params))
+    
     all_ml_ddl_records = cursor.fetchall()
     db_manager.disconnect()
 
     if not all_ml_ddl_records:
-        print("No existing ML source DDL records found in the database. Run ml_table_checker.py first.")
+        print("No existing ML source DDL records found in the database matching criteria. Run ml_table_checker.py first, or check your --objects filter.")
         return
 
     # Organize data by FQDN -> Environment -> Object Type for easy lookup
@@ -60,6 +83,9 @@ def generate_ml_ddl_change_report(source_env="DEV", target_env="DEV"):
     report_lines.append(f"# Snowflake ML DDL Change Report (Comparison: {source_env.upper()} vs {target_env.upper()})")
     report_lines.append(f"Generated On: {datetime.now().isoformat()}")
     report_lines.append(f"Deployment Environment: {DEPLOYMENT_ENVIRONMENT}\n")
+    if objects_to_compare:
+        report_lines.append(f"Objects Filtered: {', '.join(objects_to_compare)}\n")
+
 
     # Section 1: Internal DDL Changes (within each environment)
     report_lines.append("## 1. Internal DDL Changes Detected (Current vs Previous)")
@@ -82,7 +108,7 @@ def generate_ml_ddl_change_report(source_env="DEV", target_env="DEV"):
                             record['current_extracted_ddl'].splitlines(keepends=True),
                             fromfile=f"Previous_{fqdn}_{env}_{obj_type}.sql",
                             tofile=f"Current_{fqdn}_{env}_{obj_type}.sql",
-                            lineterm='' # Prevent adding extra newlines if DDL already has them
+                            lineterm=''
                         )
                         report_lines.extend(list(diff))
                     else:
@@ -92,38 +118,37 @@ def generate_ml_ddl_change_report(source_env="DEV", target_env="DEV"):
         report_lines.append("\n*No internal DDL changes detected in any environment.*")
 
     # Section 2: Cross-Environment Comparison (Source vs Target)
-    report_lines.append(f"\n## 2. Cross-Environment Comparison: {source_env.upper()} vs {target_env.upper()}")
+    report_lines.append(f"\n## 2. Cross-Environment Comparison: {source_env.upper()} vs {target_env.upper()} (by FQDN)")
     
     comparison_found = False
-    for fqdn, env_data in sorted(ddl_data_by_fqdn.items()):
-        source_obj = env_data.get(source_env.upper(), {}).get('TABLE') # Assuming TABLE for primary check for now
-        target_obj = env_data.get(target_env.upper(), {}).get('TABLE') # Assuming TABLE for primary check for now
-
-        # Add more logic here to iterate over other object_types (VIEW, etc.) if needed
-        # For simplicity, focus on TABLE for now, or find all object types for an FQDN
-
-        all_object_types_for_fqdn = sorted(list(set(ot for env_rec in env_data.values() for ot in env_rec.keys())))
+    
+    # NEW: The grouping for comparison is always by FQDN now
+    for fqdn, env_objects_data in sorted(ddl_data_by_fqdn.items()):
         
+        all_object_types_for_fqdn = sorted(list(set(ot for env_rec in env_objects_data.values() for ot in env_rec.keys())))
+
         for obj_type in all_object_types_for_fqdn:
-            source_obj_detail = env_data.get(source_env.upper(), {}).get(obj_type)
-            target_obj_detail = env_data.get(target_env.upper(), {}).get(obj_type)
+            source_obj_detail = env_objects_data.get(source_env.upper(), {}).get(obj_type)
+            target_obj_detail = env_objects_data.get(target_env.upper(), {}).get(obj_type)
+
+            source_fqdn_for_report = source_obj_detail['fqdn'] if source_obj_detail else f"N/A ({source_env.upper()})"
+            target_fqdn_for_report = target_obj_detail['fqdn'] if target_obj_detail else f"N/A ({target_env.upper()})"
+
 
             if source_obj_detail and target_obj_detail:
-                # Both exist, compare DDL hash and object type
                 comparison_found = True
-                report_lines.append(f"\n### {obj_type} {fqdn} Parity")
+                report_lines.append(f"\n### {obj_type} {fqdn} Parity ({source_env.upper()} vs {target_env.upper()})")
                 report_lines.append(f"  Source Env ({source_env.upper()}): Exists, Hash: {source_obj_detail['current_ddl_hash']}")
                 report_lines.append(f"  Target Env ({target_env.upper()}): Exists, Hash: {target_obj_detail['current_ddl_hash']}")
 
                 if source_obj_detail['current_ddl_hash'] != target_obj_detail['current_ddl_hash']:
                     report_lines.append("  **DDL HASH MISMATCH!**")
                     report_lines.append("\n```diff")
-                    # Generate a diff
                     diff = difflib.unified_diff(
                         source_obj_detail['current_extracted_ddl'].splitlines(keepends=True),
                         target_obj_detail['current_extracted_ddl'].splitlines(keepends=True),
-                        fromfile=f"{source_env.upper()}_{fqdn}_{obj_type}.sql",
-                        tofile=f"{target_env.upper()}_{fqdn}_{obj_type}.sql",
+                        fromfile=f"{source_env.upper()}_{source_fqdn_for_report}_{obj_type}.sql",
+                        tofile=f"{target_env.upper()}_{target_fqdn_for_report}_{obj_type}.sql",
                         lineterm=''
                     )
                     report_lines.extend(list(diff))
@@ -137,19 +162,23 @@ def generate_ml_ddl_change_report(source_env="DEV", target_env="DEV"):
             elif source_obj_detail and not target_obj_detail:
                 comparison_found = True
                 report_lines.append(f"\n### {obj_type} {fqdn} in {source_env.upper()} (Missing in {target_env.upper()})")
-                report_lines.append(f"  Exists in {source_env.upper()}, but NOT in {target_env.upper()}.")
+                report_lines.append(f"  Exists in {source_env.upper()} ({source_fqdn_for_report}), but NOT in {target_env.upper()}.")
             elif not source_obj_detail and target_obj_detail:
                 comparison_found = True
                 report_lines.append(f"\n### {obj_type} {fqdn} in {target_env.upper()} (Missing in {source_env.upper()})")
-                report_lines.append(f"  Exists in {target_env.upper()}, but NOT in {source_env.upper()}.")
+                report_lines.append(f"  Exists in {target_env.upper()} ({target_fqdn_for_report}), but NOT in {source_env.upper()}.")
     
     if not comparison_found:
-        report_lines.append(f"\n*No common DDL objects found for comparison between {source_env.upper()} and {target_env.upper()}.*")
+        report_lines.append(f"\n*No DDL objects found for comparison between {source_env.upper()} and {target_env.upper()} by FQDN.*")
     
     # --- 3. Save Report to File ---
-    report_filename = f"ml_ddl_change_report_{source_env.upper()}_vs_{target_env.upper()}.md"
+    report_filename = f"ml_ddl_change_report_{source_env.upper()}_vs_{target_env.upper()}_by_FQDN" # Filename always uses FQDN
+    if objects_to_compare:
+        report_filename += "_filtered"
+    report_filename += ".md"
+
     report_filepath = os.path.join(FilePaths.REPORT_OUTPUT_DIR, report_filename)
-    os.makedirs(FilePaths.REPORT_OUTPUT_DIR, exist_ok=True) # Ensure dir exists
+    os.makedirs(FilePaths.REPORT_OUTPUT_DIR, exist_ok=True)
 
     with open(report_filepath, 'w', encoding='utf-8') as f:
         f.write("\n".join(report_lines))
@@ -165,15 +194,30 @@ if __name__ == "__main__":
     parser.add_argument(
         "--source_env",
         type=str,
-        default="DEV", # Default to DEV
+        default="DEV",
         help="The source environment for comparison (e.g., DEV, SPC). Default: DEV"
     )
     parser.add_argument(
         "--target_env",
         type=str,
-        default="DEV", # Default to DEV
+        default="DEV",
         help="The target environment for comparison (e.g., DEV, PROD). Default: DEV"
     )
+    parser.add_argument(
+        "--objects",
+        type=str,
+        help="Comma-separated list of FQDNs to compare (e.g., 'DB.SCH.TABLE1,DB.SCH.TABLE2')."
+             "If not provided, all objects are included. FQDNs will be uppercased for comparison."
+    )
+    # Removed --compare_by argument
     args = parser.parse_args()
 
-    generate_ml_ddl_change_report(source_env=args.source_env.upper(), target_env=args.target_env.upper())
+    # Process --objects argument if provided
+    objects_list = [obj.strip().upper() for obj in args.objects.split(',')] if args.objects else None
+
+    generate_ml_ddl_change_report(
+        source_env=args.source_env.upper(),
+        target_env=args.target_env.upper(),
+        objects_to_compare=objects_list
+        # Removed compare_by parameter
+    )

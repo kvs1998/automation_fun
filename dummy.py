@@ -64,32 +64,12 @@ def clean_special_characters_iterative(data):
 # ... (rest of confluence_utils.py, config.py, report_generator.py remain as last full code)
 
 
+- Default Comparison (DEV vs. DEV):
+python ml_ddl_change_reporter.py
 
-# .env
-DEPLOYMENT_ENVIRONMENT=DEV # This script is running in DEV
+- Custom Comparison (e.g., DEV vs. SPC):
+python ml_ddl_change_reporter.py --source_env DEV --target_env SPC
 
-# Confluence config (unchanged)
-CONFLUENCE_BASE_URL=https://your-company.atlassian.net/wiki
-CONFLUENCE_API_TOKEN=your_personal_access_token_from_confluence
-CONFLUENCE_SPACE_KEY=YOUR_CONFLUENCE_SPACE_KEY
+- Help:
+python ml_ddl_change_reporter.py --help
 
-# Snowflake DEV environment credentials
-SNOWFLAKE_DEV_USER=your_dev_snowflake_user
-SNOWFLAKE_DEV_PASSWORD=your_dev_snowflake_password
-SNOWFLAKE_DEV_ACCOUNT=your_dev_snowflake_account.region
-SNOWFLAKE_DEV_WAREHOUSE=your_dev_snowflake_warehouse
-SNOWFLAKE_DEV_DATABASE=your_dev_snowflake_database
-SNOWFLAKE_DEV_SCHEMA=your_dev_snowflake_schema
-SNOWFLAKE_DEV_ROLE=your_dev_snowflake_role
-
-# Snowflake SPC environment credentials (example)
-SNOWFLAKE_SPC_USER=your_spc_snowflake_user
-SNOWFLAKE_SPC_PASSWORD=your_spc_snowflake_password
-SNOWFLAKE_SPC_ACCOUNT=your_spc_snowflake_account.region
-SNOWFLAKE_SPC_WAREHOUSE=your_spc_snowflake_warehouse
-SNOWFLAKE_SPC_DATABASE=your_spc_snowflake_database
-SNOWFLAKE_SPC_SCHEMA=your_spc_snowflake_schema
-SNOWFLAKE_SPC_ROLE=your_spc_snowflake_role
-
-# ... and so on for BFM, PRU, ELD, QA, UAT, DR ...
-# Ensure all environment names listed in config.py CHECK_ENVIRONMENTS have corresponding credentials here.

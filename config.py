@@ -70,7 +70,9 @@ class FilePaths:
     # MODIFIED: Single resolver file, not environment-specific in its name
     SOURCE_FQDN_RESOLVER_FILE = "source_to_fqdn_resolver.json"
     SNOWFLAKE_ML_SOURCE_TABLE = "snowflake_ml_source_metadata"
-
+    
+    # NEW: Report output directory, same as TABLES_DIR for simplicity
+    REPORT_OUTPUT_DIR = "tables"
 
 def get_confluence_page_titles(json_file_path="titles.json"):
     """

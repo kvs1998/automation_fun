@@ -219,3 +219,229 @@ def load_fqdn_resolver(json_file_path=None):
         raise e
     except Exception as e:
         raise Exception(f"An unexpected error occurred reading Source FQDN resolver file: {e}")
+
+
+# --- Test Block for load_fqdn_resolver ---
+if __name__ == "__main__":
+    print("--- Testing load_fqdn_resolver function ---")
+
+    # Test Case 1: Valid resolver map with defaults and specific overrides
+    print("\n=== Test Case 1: Valid map with defaults and specific overrides ===")
+    test_valid_json_path = "test_valid_fqdn_resolver.json"
+    valid_map_content = {
+      "PORTDB.PORTFOLIO_OPS_CANONICAL": {
+        "aliases": ["PORTDB.PORTFOLIO_OPS", "PORTFOLIO_OPS_ALT"],
+        "defaults": {
+          "environments": ["DEV", "QA"],
+          "fqdn": "RAW_DB.CORE.PORTFOLIO_OPS_COMMON",
+          "object_type": "TABLE"
+        },
+        "specific_environments": {
+          "PROD": {
+            "fqdn": "PROD_RAW_DB.PROD_CORE.PORTFOLIO_OPS_PROD",
+            "object_type": "TABLE"
+          }
+        }
+      },
+      "ISSUER_TICKER_CANONICAL": {
+        "fqdn": "RAW_DB.CORE.ISSUER_TICKER_DEFAULT", # Top-level FQDN (now ignored by resolver logic)
+        "aliases": ["ML_ASE.T_ASE_ISSUER_TICKER"],
+        "defaults": {
+          "environments": ["PREPOD", "DR"],
+          "fqdn": "RAW_DB.CORE.ISSUER_TICKER_PREPOD",
+          "object_type": "VIEW"
+        }
+      }
+    }
+    with open(test_valid_json_path, 'w', encoding='utf-8') as f:
+        json.dump(valid_map_content, f, indent=2)
+    
+    try:
+        original_resolver_file = FilePaths.SOURCE_FQDN_RESOLVER_FILE
+        FilePaths.SOURCE_FQDN_RESOLVER_FILE = test_valid_json_path
+
+        test_map = load_fqdn_resolver()
+        print("Successfully loaded valid resolver map:")
+        for k, v in test_map.items():
+            print(f"  '{k}' -> '{v}'")
+        # Validate some specific lookups
+        if test_map.get("PORTDB.PORTFOLIO_OPS_CANONICAL", {}).get("DEV") == {"fqdn": "RAW_DB.CORE.PORTFOLIO_OPS_COMMON", "object_type": "TABLE"} and \
+           test_map.get("PORTDB.PORTFOLIO_OPS_CANONICAL", {}).get("PROD") == {"fqdn": "PROD_RAW_DB.PROD_CORE.PORTFOLIO_OPS_PROD", "object_type": "TABLE"}:
+            print("  Specific environment lookups work as expected.")
+        else:
+            print("  WARNING: Specific environment lookups may not be working as expected.")
+    except Exception as e:
+        print(f"ERROR in Test Case 1 (Valid map): {e}")
+    finally:
+        if os.path.exists(test_valid_json_path):
+            os.remove(test_valid_json_path)
+        FilePaths.SOURCE_FQDN_RESOLVER_FILE = original_resolver_file
+
+
+    # Test Case 2: Duplicate canonical key (different case)
+    print("\n=== Test Case 2: Duplicate canonical key (different case) ===")
+    test_duplicate_case_json_path = "test_duplicate_case_fqdn_resolver.json"
+    duplicate_case_content = {
+      "CANONICAL_A": {
+        "defaults": {"environments": ["DEV"], "fqdn": "DB.A.TABLE", "object_type": "TABLE"}
+      },
+      "canonical_a": { # Duplicate key, different case
+        "defaults": {"environments": ["PROD"], "fqdn": "DB.B.TABLE", "object_type": "TABLE"}
+      }
+    }
+    with open(test_duplicate_case_json_path, 'w', encoding='utf-8') as f:
+        json.dump(duplicate_case_content, f, indent=2)
+    
+    try:
+        original_resolver_file = FilePaths.SOURCE_FQDN_RESOLVER_FILE
+        FilePaths.SOURCE_FQDN_RESOLVER_FILE = test_duplicate_case_json_path
+        load_fqdn_resolver()
+        print("ERROR: Duplicate canonical key (different case) was NOT detected.")
+    except ValueError as e:
+        print(f"SUCCESS: Caught expected error for duplicate canonical key (different case): {e}")
+    except Exception as e:
+        print(f"ERROR in Test Case 2 (Duplicate case): Unexpected error: {e}")
+    finally:
+        if os.path.exists(test_duplicate_case_json_path):
+            os.remove(test_duplicate_case_json_path)
+        FilePaths.SOURCE_FQDN_RESOLVER_FILE = original_resolver_file
+
+
+    # Test Case 3: Alias conflict (same alias points to different canonicals/FQDNs)
+    print("\n=== Test Case 3: Alias conflict ===")
+    test_duplicate_alias_json_path = "test_duplicate_alias_fqdn_resolver.json"
+    duplicate_alias_content = {
+      "CANONICAL_X": {
+        "defaults": {"environments": ["DEV"], "fqdn": "DB.X.TABLE", "object_type": "TABLE"},
+        "aliases": ["COMMON_ALIAS"]
+      },
+      "CANONICAL_Y": {
+        "defaults": {"environments": ["DEV"], "fqdn": "DB.Y.TABLE", "object_type": "TABLE"}, # Different FQDN
+        "aliases": ["COMMON_ALIAS"] # Same alias, different FQDN
+      }
+    }
+    with open(test_duplicate_alias_json_path, 'w', encoding='utf-8') as f:
+        json.dump(duplicate_alias_content, f, indent=2)
+    
+    try:
+        original_resolver_file = FilePaths.SOURCE_FQDN_RESOLVER_FILE
+        FilePaths.SOURCE_FQDN_RESOLVER_FILE = test_duplicate_alias_json_path
+        load_fqdn_resolver()
+        print("ERROR: Alias conflict was NOT detected.")
+    except ValueError as e:
+        print(f"SUCCESS: Caught expected error for alias conflict: {e}")
+    except Exception as e:
+        print(f"ERROR in Test Case 3 (Alias conflict): Unexpected error: {e}")
+    finally:
+        if os.path.exists(test_duplicate_alias_json_path):
+            os.remove(test_duplicate_alias_json_path)
+        FilePaths.SOURCE_FQDN_RESOLVER_FILE = original_resolver_file
+
+
+    # Test Case 4: Missing 'fqdn' key in default entry
+    print("\n=== Test Case 4: Missing 'fqdn' in 'defaults' ===")
+    test_missing_fqdn_default_json_path = "test_missing_fqdn_default_resolver.json"
+    missing_fqdn_default_content = {
+      "CANONICAL_Z": {
+        "defaults": {"environments": ["DEV"]}, # Missing 'fqdn' key
+        "aliases": []
+      }
+    }
+    with open(test_missing_fqdn_default_json_path, 'w', encoding='utf-8') as f:
+        json.dump(missing_fqdn_default_content, f, indent=2)
+    
+    try:
+        original_resolver_file = FilePaths.SOURCE_FQDN_RESOLVER_FILE
+        FilePaths.SOURCE_FQDN_RESOLVER_FILE = test_missing_fqdn_default_json_path
+        load_fqdn_resolver()
+        print("ERROR: Missing 'fqdn' in 'defaults' was NOT detected.")
+    except ValueError as e:
+        print(f"SUCCESS: Caught expected error for missing 'fqdn' in 'defaults': {e}")
+    except Exception as e:
+        print(f"ERROR in Test Case 4 (Missing 'fqdn' default): Unexpected error: {e}")
+    finally:
+        if os.path.exists(test_missing_fqdn_default_json_path):
+            os.remove(test_missing_fqdn_default_json_path)
+        FilePaths.SOURCE_FQDN_RESOLVER_FILE = original_resolver_file
+
+
+    # Test Case 5: Malformed FQDN format
+    print("\n=== Test Case 5: Malformed FQDN format ===")
+    test_malformed_fqdn_json_path = "test_malformed_fqdn_resolver.json"
+    malformed_fqdn_content = {
+      "CANONICAL_M": {
+        "defaults": {"environments": ["DEV"], "fqdn": "DB.SCHEMA_ONLY", "object_type": "TABLE"}, # Malformed FQDN
+        "aliases": []
+      }
+    }
+    with open(test_malformed_fqdn_json_path, 'w', encoding='utf-8') as f:
+        json.dump(malformed_fqdn_content, f, indent=2)
+    
+    try:
+        original_resolver_file = FilePaths.SOURCE_FQDN_RESOLVER_FILE
+        FilePaths.SOURCE_FQDN_RESOLVER_FILE = test_malformed_fqdn_json_path
+        load_fqdn_resolver()
+        print("ERROR: Malformed FQDN was NOT detected.")
+    except ValueError as e:
+        print(f"SUCCESS: Caught expected error for malformed FQDN: {e}")
+    except Exception as e:
+        print(f"ERROR in Test Case 5 (Malformed FQDN): Unexpected error: {e}")
+    finally:
+        if os.path.exists(test_malformed_fqdn_json_path):
+            os.remove(test_malformed_fqdn_json_path)
+        FilePaths.SOURCE_FQDN_RESOLVER_FILE = original_resolver_file
+
+
+    # Test Case 6: Missing 'environments' key in defaults
+    print("\n=== Test Case 6: Missing 'environments' in 'defaults' ===")
+    test_missing_envs_json_path = "test_missing_envs_resolver.json"
+    missing_envs_content = {
+      "CANONICAL_E": {
+        "defaults": {"fqdn": "DB.E.TABLE", "object_type": "TABLE"}, # Missing 'environments'
+        "aliases": []
+      }
+    }
+    with open(test_missing_envs_json_path, 'w', encoding='utf-8') as f:
+        json.dump(missing_envs_content, f, indent=2)
+    
+    try:
+        original_resolver_file = FilePaths.SOURCE_FQDN_RESOLVER_FILE
+        FilePaths.SOURCE_FQDN_RESOLVER_FILE = test_missing_envs_json_path
+        load_fqdn_resolver()
+        print("ERROR: Missing 'environments' in 'defaults' was NOT detected.")
+    except ValueError as e:
+        print(f"SUCCESS: Caught expected error for missing 'environments' in 'defaults': {e}")
+    except Exception as e:
+        print(f"ERROR in Test Case 6 (Missing environments): Unexpected error: {e}")
+    finally:
+        if os.path.exists(test_missing_envs_json_path):
+            os.remove(test_missing_envs_json_path)
+        FilePaths.SOURCE_FQDN_RESOLVER_FILE = original_resolver_file
+        
+    # Test Case 7: Canonical key with no environment mapping at all
+    print("\n=== Test Case 7: Canonical key with no environment mapping ===")
+    test_no_env_map_json_path = "test_no_env_map_resolver.json"
+    no_env_map_content = {
+      "CANONICAL_N": {
+        "aliases": ["ALIAS_N"]
+        # No 'defaults' or 'specific_environments'
+      }
+    }
+    with open(test_no_env_map_json_path, 'w', encoding='utf-8') as f:
+        json.dump(no_env_map_content, f, indent=2)
+    
+    try:
+        original_resolver_file = FilePaths.SOURCE_FQDN_RESOLVER_FILE
+        FilePaths.SOURCE_FQDN_RESOLVER_FILE = test_no_env_map_json_path
+        load_fqdn_resolver()
+        print("ERROR: No environment mapping for canonical key was NOT detected.")
+    except ValueError as e:
+        print(f"SUCCESS: Caught expected error for no environment mapping: {e}")
+    except Exception as e:
+        print(f"ERROR in Test Case 7 (No env mapping): Unexpected error: {e}")
+    finally:
+        if os.path.exists(test_no_env_map_json_path):
+            os.remove(test_no_env_map_json_path)
+        FilePaths.SOURCE_FQDN_RESOLVER_FILE = original_resolver_file
+
+    print("\n--- Testing load_fqdn_resolver function complete ---")

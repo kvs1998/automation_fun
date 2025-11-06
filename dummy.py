@@ -64,12 +64,10 @@ def clean_special_characters_iterative(data):
 # ... (rest of confluence_utils.py, config.py, report_generator.py remain as last full code)
 
 
-- Default Comparison (DEV vs. DEV):
-python ml_ddl_change_reporter.py
-
-- Custom Comparison (e.g., DEV vs. SPC):
-python ml_ddl_change_reporter.py --source_env DEV --target_env SPC
-
-- Help:
-python ml_ddl_change_reporter.py --help
+{
+  "source_env": "DEV",
+  "target_env": "DEV",
+  "objects": null,           // null for all objects, or ["DB.SCH.TABLE1", "DB.SCH.TABLE2"]
+  "output_filename": null    // null to auto-generate, or "my_custom_report.md"
+}
 

@@ -107,5 +107,13 @@ def validate_source_to_fqdn_map(db_file=None):
         for s in validation_results['unused_canonical_entries']:
             print(f"  - {s}")
 
+
+# Example usage (for testing this utility independently)
+if __name__ == "__main__":
+    try:
+        results = validate_source_to_fqdn_map()
+    except Exception as e:
+        print(f"Error during map validation: {e}")
+
     print("\n--- FQDN Map Validation Complete ---")
     return validation_results

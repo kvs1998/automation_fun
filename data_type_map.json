@@ -1,0 +1,21 @@
+{
+  "VARCHAR": "VARCHAR",
+  "CHAR": "VARCHAR",
+  "STRING": "VARCHAR",
+  "TEXT": "VARCHAR",
+  "NUMBER": "NUMBER",
+  "INTEGER": "NUMBER",
+  "INT": "NUMBER",
+  "DECIMAL": "NUMBER",
+  "NUMERIC": "NUMBER",
+  "BOOLEAN": "BOOLEAN",
+  "BOOL": "BOOLEAN",
+  "DATE": "DATE",
+  "TIMESTAMP": "TIMESTAMP_LTZ",
+  "TIME": "TIME",
+  "BIGINT": "NUMBER(38,0)"
+  // Add other mappings as your SMEs use them. Ensure keys are unique ignoring case.
+  // For types with specified length/precision like VARCHAR(N), INTEGER(P,S),
+  // map the base type (e.g., "VARCHAR" -> "VARCHAR", "NUMBER" -> "NUMBER").
+  // The DDL generator will append the (N) or (P,S) part later.
+}

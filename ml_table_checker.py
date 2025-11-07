@@ -1,11 +1,10 @@
-# ml_table_checker.py (MODIFIED to use resolver map)
-
+# ml_table_checker.py
 import os
 import json
 from datetime import datetime
 import hashlib
 
-from config import CHECK_ENVIRONMENTS, DEPLOYMENT_ENVIRONMENT, load_fqdn_resolver # NEW: Use load_fqdn_resolver
+from config import CHECK_ENVIRONMENTS, DEPLOYMENT_ENVIRONMENT, load_fqdn_resolver
 from database_manager import DatabaseManager
 from snowflake_utils import SnowflakeManager
 from confluence_utils import clean_special_characters_iterative
@@ -54,23 +53,23 @@ def check_and_ingest_ml_source_tables():
     # --- Resolve source names for each environment ---
     # resolved_fqdns_per_env: { canonical_source_name_upper: {env_name_upper: {"fqdn": FQDN, "object_type": TYPE}}}
     resolved_cross_env_fqdns_by_source = {} 
-    unresolved_source_names_from_content = set()      
+    unresolved_source_names = set()      
 
     for source_name_upper in unique_source_names_from_content:
         if source_name_upper in fqdn_resolver_map:
             resolved_cross_env_fqdns_by_source[source_name_upper] = fqdn_resolver_map[source_name_upper]
         else:
-            unresolved_source_names_from_content.add(source_name_upper)
+            unresolved_source_names.add(source_name_upper)
 
     # --- Print warnings for unmapped sources ---
-    if unresolved_source_names_from_content:
+    if unresolved_source_names:
         print("\nWARNING: The following source_table entries from Confluence content (table_1) were NOT resolved to any FQDN:")
         print(f"ACTION REQUIRED: Please add these entries (as canonical or alias) to source_to_fqdn_resolver.json.")
-        for src in sorted(list(unresolved_source_names_from_content)):
+        for src in sorted(list(unresolved_source_names)):
             print(f"  - '{src}'")
     
     if not resolved_cross_env_fqdns_by_source:
-        print("No valid logical source names derived from 'table_1's in parsed Confluence content for checking across environments.")
+        print("No valid ML source FQDNs derived from 'table_1's in parsed Confluence content for checking across environments.")
         db_manager.disconnect()
         return
 
@@ -94,15 +93,11 @@ def check_and_ingest_ml_source_tables():
 
         non_existent_objects_in_this_env = []
 
-        # Iterate through *all* resolved logical source names
         for source_name_upper, env_details_map in resolved_cross_env_fqdns_by_source.items():
-            # Get the FQDN and object_type specific to *this* environment
             env_specific_details = env_details_map.get(env_name.upper())
 
             if not env_specific_details:
                 print(f"  INFO: Logical source '{source_name_upper}' has no mapping for environment '{env_name}'. Skipping check for this env.")
-                # Insert a non-existent placeholder for this env if not present?
-                # For now, just skip. We only record if we check.
                 continue
 
             fqdn_value = env_specific_details["fqdn"]

@@ -112,23 +112,25 @@ def validate_source_to_fqdn_map(db_file=None):
 
 
 # Helper to parse column names and types from a Snowflake CREATE TABLE DDL string
+# Helper to parse column names and types from a Snowflake CREATE TABLE DDL string
 def extract_columns_from_ddl(ddl_string):
     """
-    Parses a Snowflake CREATE TABLE DDL string to extract column names.
-    Ignores constraints and comments for column names.
+    Parses a Snowflake CREATE TABLE DDL string to extract column names and their types.
+    It robustly handles constraints, comments, nullability, and default values.
     
     Args:
         ddl_string (str): The CREATE TABLE DDL statement.
         
     Returns:
         list: A list of dicts, each with 'name' and 'type' for a column.
-              Returns an empty list if DDL cannot be parsed.
+              Returns an empty list if DDL cannot be parsed or if no columns found.
     """
     columns = []
     if not ddl_string or not isinstance(ddl_string, str):
         return []
 
-    # Regex to find CREATE TABLE ... (...)
+    # Regex to find CREATE TABLE ... (...) and capture the content inside the parentheses
+    # Uses re.DOTALL to match newlines inside the parentheses
     table_pattern = re.compile(r"CREATE (?:OR REPLACE )?TABLE (?:[^.( ]+\.)?[^.( ]+\.[^.( ]+\s*\((.*)\);", re.DOTALL | re.IGNORECASE)
     match = table_pattern.search(ddl_string)
 
@@ -136,27 +138,47 @@ def extract_columns_from_ddl(ddl_string):
         print(f"WARNING: Could not find CREATE TABLE structure in DDL: {ddl_string[:100]}...")
         return []
 
-    columns_part = match.group(1)
+    columns_part = match.group(1) # This contains all column definitions, constraints, etc.
+
+    # NEW ROBUST PARSING STRATEGY:
+    # Use a regex that specifically targets column definitions, ignoring everything else.
+    # This regex is designed to be more flexible, capturing the column name and its type,
+    # and then ignoring constraints, comments, etc., on the same line.
     
-    # Split by comma, but handle commas within parentheses (e.g., in NUMBER(18,2))
-    # This regex is for splitting by comma outside of parentheses.
-    # It finds a comma (,) that is NOT followed by (any_chars), then another comma.
-    # This is often tricky. A simpler approach for DDL is often splitting lines and processing.
+    # Components:
+    # ^\s*                       - Start of line, optional leading whitespace
+    # ([A-Z0-9_]+)               - Group 1: Column Name (alphanumeric, underscore)
+    # \s+                        - At least one space
+    # ([A-Z0-9_]+\s*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\))?) - Group 2: Data Type (e.g., VARCHAR, NUMBER(38,0))
+    #                                                    (Base type + optional params)
+    # (?:                        - Non-capturing group for the rest of the line (optional constraints, comments, commas)
+    #   \s+                      - At least one space
+    #   (?:NOT NULL|DEFAULT|COMMENT|PRIMARY KEY|FOREIGN KEY|UNIQUE|CHECK|AUTOINCREMENT|\w+)+ - Keywords to ignore
+    #   .*?                      - Any characters non-greedily
+    # )?                         - The entire non-capturing group is optional
+    # \s*                        - Optional trailing whitespace
+    # ,?                         - Optional trailing comma
+    # $                          - End of line
     
-    # More robust DDL parsing: split into individual lines and process each
-    column_lines = [line.strip() for line in columns_part.splitlines() if line.strip() and not line.strip().startswith(')') and not line.strip().startswith('CONSTRAINT')]
+    # We will refine this to specifically look for columns and their types.
+    # The crucial part is to correctly handle the type definition which can have parameters.
     
-    for line in column_lines:
-        # Regex to capture column name, type, and ignore everything after (comments, constraints, etc.)
-        # Examples: "  ID VARCHAR(16) NOT NULL,", "  NAME VARCHAR,", "  LAST_UPDATED_TS TIMESTAMP_LTZ COMMENT 'Last updated timestamp'"
-        column_match = re.match(r'^\s*([A-Z0-9_]+)\s+([A-Z0-9_]+\s*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)', line, re.IGNORECASE)
-        if column_match:
-            col_name = column_match.group(1).upper()
-            col_type = column_match.group(2).upper()
-            columns.append({"name": col_name, "type": col_type})
-        else:
-            # print(f"WARNING: Could not parse column from DDL line: '{line}'")
-            pass # Ignore lines that are not simple column definitions (e.g., table constraints)
+    # This regex attempts to find (NAME TYPE) pattern and ignore anything after that.
+    # It accounts for spaces in type names (e.g., TIMESTAMP LTZ) if that's how Snowflake returns them,
+    # but based on GET_DDL, it's usually `TIMESTAMP_LTZ`.
+    column_def_pattern = re.compile(
+        r'^\s*([A-Z0-9_]+)\s+'  # Group 1: Column Name (e.g., ID)
+        r'([A-Z0-9_]+\s*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)' # Group 2: Data Type (e.g., NUMBER(38,0), VARCHAR(255))
+        r'(?:(?!\s+(?:CONSTRAINT|PRIMARY KEY|FOREIGN KEY)).)*?' # Non-greedy match anything until a constraint starts or end of line.
+                                                                # This is the key to ignore "NOT NULL", "DEFAULT", "COMMENT" etc.
+        r'(?:,|$)', # Match trailing comma or end of line (but don't capture)
+        re.IGNORECASE | re.MULTILINE
+    )
+    
+    for match in column_def_pattern.finditer(columns_part):
+        col_name = match.group(1).strip().upper()
+        col_type = match.group(2).strip().upper()
+        columns.append({"name": col_name, "type": col_type})
 
     return columns
 

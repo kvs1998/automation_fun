@@ -1,4 +1,4 @@
-# data_type_mapper.py (MODIFIED generate_data_type_report for page titles in WARNING)
+# data_type_mapper.py (MODIFIED resolve_snowflake_data_type and generate_data_type_report)
 
 import os
 import json
@@ -16,57 +16,89 @@ def resolve_snowflake_data_type(confluence_data_type, data_type_map):
     """
     Resolves a Confluence data type string to its corresponding Snowflake data type.
     Handles length/precision and defaults to VARCHAR if base type is unmapped or empty.
+    Returns the resolved type and a list of any warnings/errors encountered.
     
     Args:
         confluence_data_type (str): The raw data type string from Confluence (e.g., "VARCHAR(6)", "NUMBER", "Integer").
         data_type_map (dict): The loaded data type mapping (keys are uppercase Confluence base types).
         
     Returns:
-        str: The resolved Snowflake data type, or a formatted error string if unmappable.
+        tuple: (resolved_snowflake_type: str, warnings: list[str])
     """
-    if not confluence_data_type or not isinstance(confluence_data_type, str):
-        return "VARCHAR(16777216)"
+    warnings = []
 
-    match = re.match(r'([A-Z_]+)\s*(\(.*\))?', confluence_data_type.upper().strip())
+    if not confluence_data_type or not isinstance(confluence_data_type, str):
+        warnings.append(f"Missing or invalid Confluence data type input: '{confluence_data_type}'")
+        return "VARCHAR(16777216)", warnings # Default and warn
+
+    cleaned_conf_type = confluence_data_type.upper().strip()
+    
+    # Handle composite types like "FLOAT or NUMBER" before regex
+    if "FLOAT OR NUMBER" in cleaned_conf_type:
+        cleaned_conf_type = cleaned_conf_type.replace("FLOAT OR NUMBER", "NUMBER")
+    
+    # Regex to capture base type and a *potentially valid* parameter part
+    # It allows for: (digits) or (digits,digits)
+    # This regex is strict enough for valid SQL parameter formats.
+    match = re.match(r'([A-Z_]+)\s*(\(\s*\d+(?:\s*,\s*\d+)?\s*\))?', cleaned_conf_type)
     
     base_type_confluence = None
-    params_confluence = ""
+    params_confluence = "" 
 
     if match:
         base_type_confluence = match.group(1)
         if match.group(2):
             params_confluence = match.group(2)
+        
+        # Additional check for malformed parameters if they were captured by main regex
+        if params_confluence and not re.fullmatch(r'\(\s*\d+(?:\s*,\s*\d+)?\s*\)', params_confluence):
+            warnings.append(f"Malformed parameters '{params_confluence}' for type '{confluence_data_type}'. Using base type mapping if available.")
+            params_confluence = "" # Discard malformed params if they don't conform
     else:
-        base_type_confluence = confluence_data_type.upper().strip()
+        # If no regex match at all for the structure, it's a completely malformed type
+        warnings.append(f"Unrecognized or malformed data type format: '{confluence_data_type}'. Attempting to map '{cleaned_conf_type}' as base type.")
+        # If the structure doesn't match the regex pattern, treat the whole string as the base type
+        base_type_confluence = cleaned_conf_type 
+        
+    # Check for mismatched parentheses (independent of regex match success)
+    if cleaned_conf_type.count('(') != cleaned_conf_type.count(')'):
+        warnings.append(f"Mismatched parentheses in type '{confluence_data_type}'. Discarding parameters.")
+        params_confluence = "" # Discard parameters if parentheses are mismatched
 
     if not base_type_confluence:
-        return "VARCHAR(16777216)"
+        warnings.append(f"Could not determine base type for '{confluence_data_type}'.")
+        return "VARCHAR(16777216)", warnings # Final default and warn
 
+    # Lookup in the provided data_type_map (keys are already uppercase)
     snowflake_base_type = data_type_map.get(base_type_confluence)
 
     if snowflake_base_type:
-        if snowflake_base_type.upper() == 'NUMBER' and 'NUMBER' in base_type_confluence:
+        # Special handling for NUMBER/INTEGER default precision if SME doesn't specify
+        if snowflake_base_type.upper() == 'NUMBER' and base_type_confluence in ['NUMBER', 'INTEGER', 'INT', 'DECIMAL', 'NUMERIC']:
             if not params_confluence:
-                return "NUMBER(38,0)"
-        elif snowflake_base_type.upper() == 'INTEGER' and 'INTEGER' in base_type_confluence:
-            if not params_confluence:
-                return "NUMBER(38,0)"
+                return "NUMBER(38,0)", warnings # Default precision/scale for INTEGER/NUMBER
         
-        if params_confluence and (snowflake_base_type.upper() in ["VARCHAR", "NUMBER", "DECIMAL", "CHAR", "STRING"]):
-            return f"{snowflake_base_type}{params_confluence}"
+        # General case: If Confluence gave params, and Snowflake type is compatible, keep params
+        if params_confluence and (snowflake_base_type.upper() in ["VARCHAR", "NUMBER", "DECIMAL", "CHAR", "STRING", "TEXT"]):
+            # Ensure parameters are valid before combining (double-check after previous param cleaning)
+            if re.fullmatch(r'\(\s*\d+(?:\s*,\s*\d+)?\s*\)', params_confluence):
+                 return f"{snowflake_base_type}{params_confluence}", warnings
+            else:
+                 warnings.append(f"Malformed parameters '{params_confluence}' in type '{confluence_data_type}'. Using base type '{snowflake_base_type}'.")
+                 return snowflake_base_type, warnings
         else:
-            return snowflake_base_type
+            return snowflake_base_type, warnings
 
     else:
-        # Default to VARCHAR for unmapped base types
-        return "VARCHAR(16777216)"
+        # If the base type is not found in the map, default to VARCHAR
+        warnings.append(f"Confluence data type '{confluence_data_type}' (base: '{base_type_confluence}') not found in map. Defaulting to VARCHAR.")
+        return "VARCHAR(16777216)", warnings # Final default and warn
 
 
 def generate_data_type_report(config_file=None):
     """
     Generates a report on Confluence data types and their resolved Snowflake equivalents.
-    Identifies unmapped Confluence data types and lists the pages where they were found
-    in the ACTION REQUIRED section.
+    Identifies unmapped/malformed Confluence data types and reports them in separate sections.
     """
     print("\n--- Starting Data Type Mapping and Report Generation ---")
 
@@ -79,34 +111,31 @@ def generate_data_type_report(config_file=None):
         db_manager.disconnect()
         return
 
-    # NEW: Dictionary to store unique Confluence data types and the *unique page titles* they originated from
-    # { "CONFLUENCE_TYPE_STRING": ["Page Title A", "Page Title B"], ... }
     confluence_data_types_with_sources = {} 
 
     try:
         cursor = db_manager.conn.cursor()
-        # Fetch page metadata to get titles for the report
         page_metadata_map = {p['page_id']: p['api_title'] for p in cursor.execute("SELECT page_id, api_title FROM confluence_page_metadata").fetchall()}
 
         cursor.execute("SELECT page_id, parsed_json FROM confluence_parsed_content")
         
         for row in cursor.fetchall():
             page_id = row['page_id']
-            page_title = page_metadata_map.get(page_id, f"Page ID:{page_id}") # Get title, fallback if not found
+            page_title = page_metadata_map.get(page_id, f"Page ID:{page_id}")
             parsed_content_json_str = row['parsed_json']
             if parsed_content_json_str:
                 parsed_content = json.loads(parsed_content_json_str)
-                cleaned_parsed_content = parsed_content # Assume already clean from data_parser
+                cleaned_parsed_content = parsed_content 
                 
                 for table_data in cleaned_parsed_content.get('tables', []):
-                    if table_data.get('id') == 'table_1': # Only process 'table_1'
+                    if table_data.get('id') == 'table_1':
                         for column in table_data.get('columns', []):
                             conf_data_type = column.get('data_type')
                             if conf_data_type and conf_data_type.strip():
                                 conf_type_key = conf_data_type.strip()
                                 if conf_type_key not in confluence_data_types_with_sources:
-                                    confluence_data_types_with_sources[conf_type_key] = set() # Use a set to store unique titles
-                                confluence_data_types_with_sources[conf_type_key].add(page_title) # Add page title (unique by set)
+                                    confluence_data_types_with_sources[conf_type_key] = set()
+                                confluence_data_types_with_sources[conf_type_key].add(page_title)
 
     except json.JSONDecodeError as e:
         print(f"ERROR: Invalid JSON in confluence_parsed_content for a page: {e}")
@@ -129,36 +158,55 @@ def generate_data_type_report(config_file=None):
     report_lines.append(f"Generated On: {datetime.now().isoformat()}\n")
 
     report_data_rows = []
-    unresolved_types_for_action_detail = {} # NEW: { "TYPE_STR": "Page1, Page2", ... }
+    # NEW: Dictionaries to store different types of issues
+    syntax_or_malformed_warnings = {} # For types with syntax issues
+    unmapped_types_for_action = {}    # For types not in map, defaulted to VARCHAR
 
     for conf_type in sorted(confluence_data_types_with_sources.keys()):
-        resolved_sf_type = resolve_snowflake_data_type(conf_type, data_type_map)
+        # resolve_snowflake_data_type now returns (resolved_type, warnings_list)
+        resolved_sf_type, warnings_list = resolve_snowflake_data_type(conf_type, data_type_map)
         
         notes = ""
-        if resolved_sf_type == "VARCHAR(16777216)":
-            notes = "Defaulted to VARCHAR due to unknown or empty Confluence type."
-            # NEW: Collect page titles for the warning section
-            unresolved_types_for_action_detail[conf_type] = ", ".join(sorted(list(confluence_data_types_with_sources[conf_type])))
-        else:
+        # Aggregate notes and categorize warnings
+        for warning in warnings_list:
+            if "Malformed" in warning or "Unrecognized" in warning or "Mismatched" in warning or "Invalid content" in warning:
+                syntax_or_malformed_warnings[conf_type] = warnings_list # Store all warnings for this type
+            elif "not found in map" in warning:
+                unmapped_types_for_action[conf_type] = ", ".join(sorted(list(confluence_data_types_with_sources[conf_type])))
+            
+            notes += warning + "; " # Combine all warnings into notes
+
+        if not notes: # If no warnings, it's a clean map
             notes = "Mapped via data_type_map.json"
         
-        # OLD: Removed Source Pages column from here.
         report_data_rows.append([
             conf_type,
             resolved_sf_type,
             notes
         ])
     
-    # NEW: Headers for the simplified table
     headers = ["Confluence Type", "Resolved Snowflake Type", "Notes"]
     report_lines.append("## 1. Confluence Data Type Resolution\n")
     report_lines.append(tabulate(report_data_rows, headers=headers, tablefmt="pipe"))
-    report_lines.append("\n") # Add a newline after the table
+    report_lines.append("\n")
 
-    if unresolved_types_for_action_detail:
-        report_lines.append(f"**ACTION REQUIRED:** The following Confluence data types were not explicitly mapped and defaulted to VARCHAR.")
+    # NEW: Separate section for syntax/malformed warnings
+    if syntax_or_malformed_warnings:
+        report_lines.append("## 2. Data Type Syntax / Malformation Warnings")
+        report_lines.append(f"**ACTION REQUIRED:** The following Confluence data types have syntax or format issues. These are currently defaulted to VARCHAR(16777216).")
+        for conf_type, warnings_list in sorted(syntax_or_malformed_warnings.items()):
+            pages_str = ", ".join(sorted(list(confluence_data_types_with_sources[conf_type])))
+            report_lines.append(f"  - Type: '{conf_type}' (Found in pages: {pages_str})")
+            for warning in warnings_list:
+                report_lines.append(f"    - WARNING: {warning}")
+        report_lines.append(f"Please correct the data types in Confluence or update '{FilePaths.DATA_TYPE_MAP_FILE}' if this is a known variant.\n")
+
+    # The existing ACTION REQUIRED for unmapped types
+    if unmapped_types_for_action:
+        report_lines.append("## 3. Unmapped Confluence Data Types")
+        report_lines.append(f"**ACTION REQUIRED:** The following Confluence data types were not explicitly mapped and defaulted to VARCHAR(16777216).")
         report_lines.append(f"Please review and update '{FilePaths.DATA_TYPE_MAP_FILE}'.")
-        for conf_type, pages_str in unresolved_types_for_action_detail.items():
+        for conf_type, pages_str in sorted(unmapped_types_for_action.items()):
             report_lines.append(f"  - Type: '{conf_type}' (Found in pages: {pages_str})")
     else:
         report_lines.append("All Confluence data types found were either explicitly mapped or known to default to VARCHAR.")

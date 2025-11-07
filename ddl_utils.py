@@ -112,260 +112,243 @@ def validate_source_to_fqdn_map(db_file=None):
 
 
 # Helper to parse column names and types from a Snowflake CREATE TABLE DDL string
+def extract_columns_from_ddl(ddl_string):
+    """
+    Parses a Snowflake CREATE TABLE DDL string to extract column names and their types.
+    It is designed to be highly robust to various formatting, complex DEFAULT clauses,
+    and table-level constraints.
+    
+    Args:
+        ddl_string (str): The CREATE TABLE DDL statement from Snowflake.
+        
+    Returns:
+        list: A list of dicts, each with 'name' and 'type' for a column.
+              Returns an empty list if DDL cannot be parsed or if no columns found.
+    """
+    columns = []
+    if not ddl_string or not isinstance(ddl_string, str):
+        return []
 
-	def extract_columns_from_ddl(ddl_string):
-	    """
-	    Parses a Snowflake CREATE TABLE DDL string to extract column names and their types.
-	    It specifically handles complex DEFAULT clauses and table-level PRIMARY KEY definitions.
-	    
-	    Args:
-	        ddl_string (str): The CREATE TABLE DDL statement from Snowflake.
-	        
-	    Returns:
-	        list: A list of dicts, each with 'name' and 'type' for a column.
-	              Returns an empty list if DDL cannot be parsed or if no columns found.
-	    """
-	    columns = []
-	    if not ddl_string or not isinstance(ddl_string, str):
-	        return []
-	
-	    # Regex to find CREATE TABLE ... (...) and capture the content inside the parentheses
-	    # This block contains all column definitions and table-level constraints.
-	    table_pattern = re.compile(r"CREATE (?:OR REPLACE )?TABLE (?:[^.( ]+\.)?[^.( ]+\.[^.( ]+\s*\((.*)\);", re.DOTALL | re.IGNORECASE)
-	    match = table_pattern.search(ddl_string)
-	
-	    if not match:
-	        print(f"WARNING: Could not find CREATE TABLE structure in DDL: {ddl_string[:100]}...")
-	        return []
-	
-	    columns_and_constraints_block = match.group(1)
-	    
-	    # NEW ROBUST PARSING STRATEGY FOR SNOWFLAKE GET_DDL OUTPUT:
-	    # 1. Split the block into potential individual definitions (often comma-separated or newline-separated).
-	    # 2. Use a regex to specifically identify lines that *are* column definitions
-	    #    while being robust to NOT NULL, DEFAULT, and complex DEFAULT CAST(...) clauses.
-	    # 3. Explicitly filter out lines that are table-level constraints (like PRIMARY KEY (...)).
-	
-	    # Regex for a single column definition line:
-	    # ^\s*                       - Start of line, optional leading whitespace
-	    # ([A-Z0-9_]+)               - Group 1: Column Name (e.g., ISSUER)
-	    # \s+                        - At least one space
-	    # (                          - Group 2: Data Type
-	    #   (?:[A-Z0-9_]+\s*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\))?) - Base Type with optional params (e.g., VARCHAR(6))
-	    # )                          - End Group 2
-	    # (?:                        - Non-capturing group for the rest of the line (optional modifiers/comments/defaults)
-	    #   \s+                      - At least one space
-	    #   (?:NOT NULL|DEFAULT|COMMENT|AUTOINCREMENT|AS|CONSTRAINT|PRIMARY KEY|FOREIGN KEY|UNIQUE|CHECK|.*?\))?)*? - Keywords/patterns to ignore after type
-	    #   .*?                      - Any characters non-greedily
-	    # )?                         - The entire rest-of-line group is optional
-	    # ,?                         - Optional trailing comma
-	    # $                          - End of line (for single-line processing)
-	    
-	    column_def_pattern = re.compile(
-	        r'^\s*([A-Z0-9_]+)\s+'  # Group 1: Column Name
-	        r'([A-Z0-9_]+\s*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)' # Group 2: Data Type
-	        r'(?:'                                              # Start non-capturing group for modifiers to ignore
-	        r'\s+'                                              # One or more spaces
-	        r'(?:'                                              # Start inner non-capturing group for known modifiers
-	        r'NOT\s+NULL|'                                      # NOT NULL
-	        r'DEFAULT(?:\s+CAST\(.*?\)\s*)?.*?'                 # DEFAULT, handling DEFAULT CAST(...)
-	        r'COMMENT\s+\'.*?\'|'                               # COMMENT '...'
-	        r'[A-Z0-9_]+'                                       # Other alphanumeric words like AUTOINCREMENT etc.
-	        r')'                                                # End inner non-capturing group
-	        r')*?'                                              # Match zero or more modifiers non-greedily
-	        r'(?:,)?'                                           # Optional comma at end
-	        r'$',                                               # End of line
-	        re.IGNORECASE
-	    )
-	
-	    # Patterns to explicitly identify and IGNORE table-level constraints
-	    table_constraint_patterns = [
-	        re.compile(r'^\s*CONSTRAINT\s+', re.IGNORECASE),
-	        re.compile(r'^\s*PRIMARY\s+KEY\s*\(', re.IGNORECASE),
-	        re.compile(r'^\s*FOREIGN\s+KEY\s*\(', re.IGNORECASE),
-	        re.compile(r'^\s*UNIQUE\s*\(', re.IGNORECASE),
-	        re.compile(r'^\s*CHECK\s*\(', re.IGNORECASE),
-	    ]
-	
-	    # Process each line from the DDL block
-	    for line in columns_and_constraints_block.splitlines():
-	        stripped_line = line.strip()
-	        if not stripped_line:
-	            continue # Skip empty lines
-	
-	        # First, check if this line is clearly a table-level constraint
-	        is_constraint_line = False
-	        for pattern in table_constraint_patterns:
-	            if pattern.match(stripped_line):
-	                is_constraint_line = True
-	                break
-	        
-	        if is_constraint_line:
-	            # print(f"DEBUG: Skipping constraint line: '{stripped_line}'")
-	            continue # Skip this line, it's a table-level constraint
-	
-	        # If not a constraint, try to parse it as a column definition
-	        column_match = column_def_pattern.match(stripped_line)
-	        if column_match:
-	            col_name = column_match.group(1).upper()
-	            col_type = column_match.group(2).upper()
-	            columns.append({"name": col_name, "type": col_type})
-	        # else:
-	            # print(f"DEBUG: Could not parse column from line (might be a complex part or unhandled modifier): '{stripped_line}'")
-	
-	
-	    return columns
-	
-	
-	# validate_source_to_fqdn_map function (remains unchanged)
-	def validate_source_to_fqdn_map(db_file=None):
-	    # ... (unchanged)
-	
-	# Test block for ddl_utils.py (MODIFIED with your ML DDL and expanded tests)
-	if __name__ == "__main__":
-	    print("--- Testing ddl_utils.py functions ---")
-	
-	    # Your provided ML DDL example
-	    ml_ddl_example = """
-	    create or replace TABLE ISSUER_TICKER (
-	        ISSUER VARCHAR(6) NOT NULL DEFAULT '',
-	        TICKER VARCHAR(32) NOT NULL DEFAULT '',
-	        EXCHANGE VARCHAR(16) NOT NULL DEFAULT '',
-	        MODIFY_TIME TIMESTAMP_NTZ(3),
-	        CREATED_BY_USER_ID VARCHAR(255) NOT NULL DEFAULT '',
-	        CREATED_DTS TIMESTAMP_LTZ(3) NOT NULL DEFAULT CAST('0001-01-01 00:00:00' AS TIMESTAMP_LTZ(3)),
-	        DATA_DOMAIN VARCHAR(10) NOT NULL DEFAULT '',
-	        HVR_CAPTURE_LOCATION VARCHAR(255) NOT NULL DEFAULT '',
-	        HVR_CHANGE_OP NUMBER(38,0) NOT NULL DEFAULT 0,
-	        HVR_CHANGE_TIME TIMESTAMP_LTZ(3) NOT NULL DEFAULT CAST('0001-01-01 00:00:00' AS TIMESTAMP_LTZ(3)),
-	        HVR_DUPLICATE VARCHAR(1) NOT NULL DEFAULT '',
-	        HVR_TX_COUNT_DOWN NUMBER(38,0) NOT NULL DEFAULT 0,
-	        HVR_TX_SEQUENCE VARCHAR(45) NOT NULL DEFAULT '',
-	        PROVIDER_NM VARCHAR(10) NOT NULL DEFAULT '',
-	        HVR_DC VARCHAR(10) NOT NULL DEFAULT '',
-	        primary key (ISSUER, EXCHANGE, HVR_TX_SEQUENCE)
-	    );
-	    """
-	    ml_columns = extract_columns_from_ddl(ml_ddl_example)
-	    print("\nExtracted columns from ML DDL example:")
-	    for col in ml_columns:
-	        print(f"  - Name: {col['name']}, Type: {col['type']}")
-	    
-	    expected_ml_columns = [
-	        {"name": "ISSUER", "type": "VARCHAR(6)"},
-	        {"name": "TICKER", "type": "VARCHAR(32)"},
-	        {"name": "EXCHANGE", "type": "VARCHAR(16)"},
-	        {"name": "MODIFY_TIME", "type": "TIMESTAMP_NTZ(3)"},
-	        {"name": "CREATED_BY_USER_ID", "type": "VARCHAR(255)"},
-	        {"name": "CREATED_DTS", "type": "TIMESTAMP_LTZ(3)"},
-	        {"name": "DATA_DOMAIN", "type": "VARCHAR(10)"},
-	        {"name": "HVR_CAPTURE_LOCATION", "type": "VARCHAR(255)"},
-	        {"name": "HVR_CHANGE_OP", "type": "NUMBER(38,0)"},
-	        {"name": "HVR_CHANGE_TIME", "type": "TIMESTAMP_LTZ(3)"},
-	        {"name": "HVR_DUPLICATE", "type": "VARCHAR(1)"},
-	        {"name": "HVR_TX_COUNT_DOWN", "type": "NUMBER(38,0)"},
-	        {"name": "HVR_TX_SEQUENCE", "type": "VARCHAR(45)"},
-	        {"name": "PROVIDER_NM", "type": "VARCHAR(10)"},
-	        {"name": "HVR_DC", "type": "VARCHAR(10)"},
-	    ]
-	    if ml_columns == expected_ml_columns:
-	        print("SUCCESS: ML DDL column extraction matches expected.")
-	    else:
-	        print("FAILURE: ML DDL column extraction DOES NOT match expected.")
-	        print(f"  Actual: {ml_columns}")
-	        print(f"  Expected: {expected_ml_columns}")
-	
-	
-	    # Previous test cases (keep for robustness)
-	    sample_ddl = """
-	    CREATE TABLE MY_DB.MY_SCHEMA.MY_TABLE (
-	        ID NUMBER(38,0) NOT NULL COMMENT 'Primary key for the table',
-	        NAME VARCHAR(255) COMMENT 'Name of the item',
-	        AMOUNT DECIMAL(18,2),
-	        IS_ACTIVE BOOLEAN DEFAULT TRUE,
-	        CREATED_DATE TIMESTAMP_LTZ(9),
-	        CONSTRAINT PK_MY_TABLE PRIMARY KEY (ID),
-	        FOREIGN KEY (ID) REFERENCES OTHER_TABLE(OTHER_ID)
-	    );
-	    """
-	    columns = extract_columns_from_ddl(sample_ddl)
-	    print("\nExtracted columns from sample DDL:")
-	    # ... (print and check logic as before)
-	    expected_columns = [
-	        {"name": "ID", "type": "NUMBER(38,0)"},
-	        {"name": "NAME", "type": "VARCHAR(255)"},
-	        {"name": "AMOUNT", "type": "DECIMAL(18,2)"},
-	        {"name": "IS_ACTIVE", "type": "BOOLEAN"},
-	        {"name": "CREATED_DATE", "type": "TIMESTAMP_LTZ(9)"},
-	    ]
-	    if columns == expected_columns:
-	        print("SUCCESS: DDL column extraction matches expected.")
-	    else:
-	        print("FAILURE: DDL column extraction DOES NOT match expected.")
-	        print(f"  Actual: {columns}")
-	        print(f"  Expected: {expected_columns}")
-	
-	
-	    sample_ddl_2 = """
-	    CREATE OR REPLACE TABLE ANOTHER_DB.ANOTHER_SCHEMA.ANOTHER_TABLE (
-	        COL1 VARCHAR,
-	        COL2 INTEGER COMMENT 'Some integer value',
-	        COL3 TIMESTAMP_NTZ NOT NULL,
-	        COL4 TEXT
-	    );
-	    """
-	    columns_2 = extract_columns_from_ddl(sample_ddl_2)
-	    print("\nExtracted columns from sample DDL 2:")
-	    # ... (print and check logic as before)
-	    expected_columns_2 = [
-	        {"name": "COL1", "type": "VARCHAR"},
-	        {"name": "COL2", "type": "INTEGER"},
-	        {"name": "COL3", "type": "TIMESTAMP_NTZ"},
-	        {"name": "COL4", "type": "TEXT"},
-	    ]
-	    if columns_2 == expected_columns_2:
-	        print("SUCCESS: DDL column extraction 2 matches expected.")
-	    else:
-	        print("FAILURE: DDL column extraction 2 DOES NOT match expected.")
-	        print(f"  Actual: {columns_2}")
-	        print(f"  Expected: {expected_columns_2}")
-	
-	    sample_ddl_3 = """
-	    CREATE TABLE MY_DB.COMPLEX_SCHEMA.COMPLEX_TABLE (
-	        AMOUNT_NUM NUMBER(38, 9),
-	        LONG_TEXT VARCHAR(16777216),
-	        FLAG_VAL BOOLEAN
-	    );
-	    """
-	    columns_3 = extract_columns_from_ddl(sample_ddl_3)
-	    print("\nExtracted columns from sample DDL 3:")
-	    # ... (print and check logic as before)
-	    expected_columns_3 = [
-	        {"name": "AMOUNT_NUM", "type": "NUMBER(38, 9)"},
-	        {"name": "LONG_TEXT", "type": "VARCHAR(16777216)"},
-	        {"name": "FLAG_VAL", "type": "BOOLEAN"},
-	    ]
-	    if columns_3 == expected_columns_3:
-	        print("SUCCESS: DDL column extraction 3 matches expected.")
-	    else:
-	        print("FAILURE: DDL column extraction 3 DOES NOT match expected.")
-	        print(f"  Actual: {columns_3}")
-	        print(f"  Expected: {expected_columns_3}")
-	
-	    sample_ddl_view = """
-	    CREATE VIEW MY_DB.MY_SCHEMA.MY_VIEW AS
-	    SELECT ID, NAME FROM OTHER_TABLE;
-	    """
-	    columns_view = extract_columns_from_ddl(sample_ddl_view)
-	    print("\nExtracted columns from sample VIEW DDL:")
-	    if not columns_view:
-	        print("  (No columns extracted, as expected for a VIEW)")
-	    else:
-	        print(f"  {columns_view}")
-	    if not columns_view:
-	        print("SUCCESS: DDL column extraction for VIEW DDL returns empty list as expected.")
-	    else:
-	        print("FAILURE: DDL column extraction for VIEW DDL returned non-empty list.")
-	
-	
-	    print("\n--- Testing ddl_utils.py complete ---")
+    # NEW HIGHLY ROBUST TABLE PATTERN:
+    # Captures the content inside the FIRST outermost parentheses of a CREATE TABLE statement.
+    # This accounts for 'OR REPLACE', multi-part table names, and allows any content within parentheses.
+    table_pattern = re.compile(
+        r"CREATE (?:OR REPLACE )?TABLE \S+(?:\.\S+){1,2}\s*\("  # Matches CREATE TABLE DB.SCHEMA.TABLE (
+        r"(.*?)"                                            # Group 1: Captures everything non-greedily until the next part
+        r"\)[^;]*;",                                         # Matches the closing parenthesis, optional non-semicolons, then semicolon
+        re.DOTALL | re.IGNORECASE                           # DOTALL to match newlines, IGNORECASE for flexibility
+    )
+    match = table_pattern.search(ddl_string)
+
+    if not match:
+        print(f"WARNING: Could not find CREATE TABLE structure in DDL: {ddl_string[:100].replace('\n', ' ')}...")
+        return []
+
+    columns_and_constraints_block = match.group(1) # This is the entire content inside the main ( )
+    
+    # NEW ROBUST COLUMN DEFINITION PATTERN:
+    # This pattern is applied line-by-line or on segments of the block.
+    # It specifically targets COLUMN NAME and DATA TYPE, and then ignores everything else on that line.
+    
+    column_def_pattern = re.compile(
+        r'^\s*([A-Z0-9_]+)\s+'  # Group 1: Column Name (alphanumeric, underscore)
+        r'([A-Z0-9_]+\s*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)' # Group 2: Data Type (e.g., VARCHAR(6), NUMBER(38,0))
+        r'(?:'                                              # Start non-capturing group for modifiers to ignore
+        r'\s+'                                              # One or more spaces
+        r'(?:NOT\s+NULL|DEFAULT(?:\s+CAST\(.*?\)\s*)?|COMMENT\s+\'.*?\'|[A-Z0-9_]+)' # Common modifiers (DEFAULT CAST handled)
+        r')*?'                                              # Match zero or more modifiers non-greedily
+        r',?'                                               # Optional trailing comma
+        r'$',                                               # End of line
+        re.IGNORECASE | re.MULTILINE                        # IGNORECASE and MULTILINE for line-by-line processing
+    )
+
+    # Patterns to explicitly identify and IGNORE table-level constraints
+    table_constraint_patterns = [
+        re.compile(r'^\s*CONSTRAINT\s+', re.IGNORECASE),
+        re.compile(r'^\s*PRIMARY\s+KEY\s*\(', re.IGNORECASE),
+        re.compile(r'^\s*FOREIGN\s+KEY\s*\(', re.IGNORECASE),
+        re.compile(r'^\s*UNIQUE\s*\(', re.IGNORECASE),
+        re.compile(r'^\s*CHECK\s*\(', re.IGNORECASE),
+    ]
+
+    # Process each line from the DDL block
+    for line in columns_and_constraints_block.splitlines():
+        stripped_line = line.strip()
+        if not stripped_line:
+            continue # Skip empty lines
+
+        # First, check if this line is clearly a table-level constraint
+        is_constraint_line = False
+        for pattern in table_constraint_patterns:
+            if pattern.match(stripped_line):
+                is_constraint_line = True
+                break
+        
+        if is_constraint_line:
+            continue # Skip this line, it's a table-level constraint
+
+        # If not a constraint, try to parse it as a column definition
+        column_match = column_def_pattern.match(stripped_line)
+        if column_match:
+            col_name = column_match.group(1).upper()
+            col_type = column_match.group(2).upper()
+            columns.append({"name": col_name, "type": col_type})
+        # else:
+            # print(f"DEBUG: Could not parse column from line: '{stripped_line}'")
+
+
+    return columns
+
+
+# validate_source_to_fqdn_map function (remains unchanged)
+def validate_source_to_fqdn_map(db_file=None):
+    # ... (unchanged)
+
+# Test block for ddl_utils.py (MODIFIED with your ML DDL and expanded tests)
+if __name__ == "__main__":
+    print("--- Testing ddl_utils.py functions ---")
+
+    # Your provided ML DDL example
+    ml_ddl_example = """
+    create or replace TABLE ISSUER_TICKER (
+        ISSUER VARCHAR(6) NOT NULL DEFAULT '',
+        TICKER VARCHAR(32) NOT NULL DEFAULT '',
+        EXCHANGE VARCHAR(16) NOT NULL DEFAULT '',
+        MODIFY_TIME TIMESTAMP_NTZ(3),
+        CREATED_BY_USER_ID VARCHAR(255) NOT NULL DEFAULT '',
+        CREATED_DTS TIMESTAMP_LTZ(3) NOT NULL DEFAULT CAST('0001-01-01 00:00:00' AS TIMESTAMP_LTZ(3)),
+        DATA_DOMAIN VARCHAR(10) NOT NULL DEFAULT '',
+        HVR_CAPTURE_LOCATION VARCHAR(255) NOT NULL DEFAULT '',
+        HVR_CHANGE_OP NUMBER(38,0) NOT NULL DEFAULT 0,
+        HVR_CHANGE_TIME TIMESTAMP_LTZ(3) NOT NULL DEFAULT CAST('0001-01-01 00:00:00' AS TIMESTAMP_LTZ(3)),
+        HVR_DUPLICATE VARCHAR(1) NOT NULL DEFAULT '',
+        HVR_TX_COUNT_DOWN NUMBER(38,0) NOT NULL DEFAULT 0,
+        HVR_TX_SEQUENCE VARCHAR(45) NOT NULL DEFAULT '',
+        PROVIDER_NM VARCHAR(10) NOT NULL DEFAULT '',
+        HVR_DC VARCHAR(10) NOT NULL DEFAULT '',
+        primary key (ISSUER, EXCHANGE, HVR_TX_SEQUENCE)
+    );
+    """
+    ml_columns = extract_columns_from_ddl(ml_ddl_example)
+    print("\nExtracted columns from ML DDL example:")
+    for col in ml_columns:
+        print(f"  - Name: {col['name']}, Type: {col['type']}")
+    
+    expected_ml_columns = [
+        {"name": "ISSUER", "type": "VARCHAR(6)"},
+        {"name": "TICKER", "type": "VARCHAR(32)"},
+        {"name": "EXCHANGE", "type": "VARCHAR(16)"},
+        {"name": "MODIFY_TIME", "type": "TIMESTAMP_NTZ(3)"},
+        {"name": "CREATED_BY_USER_ID", "type": "VARCHAR(255)"},
+        {"name": "CREATED_DTS", "type": "TIMESTAMP_LTZ(3)"},
+        {"name": "DATA_DOMAIN", "type": "VARCHAR(10)"},
+        {"name": "HVR_CAPTURE_LOCATION", "type": "VARCHAR(255)"},
+        {"name": "HVR_CHANGE_OP", "type": "NUMBER(38,0)"},
+        {"name": "HVR_CHANGE_TIME", "type": "TIMESTAMP_LTZ(3)"},
+        {"name": "HVR_DUPLICATE", "type": "VARCHAR(1)"},
+        {"name": "HVR_TX_COUNT_DOWN", "type": "NUMBER(38,0)"},
+        {"name": "HVR_TX_SEQUENCE", "type": "VARCHAR(45)"},
+        {"name": "PROVIDER_NM", "type": "VARCHAR(10)"},
+        {"name": "HVR_DC", "type": "VARCHAR(10)"},
+    ]
+    if ml_columns == expected_ml_columns:
+        print("SUCCESS: ML DDL column extraction matches expected.")
+    else:
+        print("FAILURE: ML DDL column extraction DOES NOT match expected.")
+        print(f"  Actual: {ml_columns}")
+        print(f"  Expected: {expected_ml_columns}")
+
+
+    # Previous test cases (keep for robustness)
+    sample_ddl = """
+    CREATE TABLE MY_DB.MY_SCHEMA.MY_TABLE (
+        ID NUMBER(38,0) NOT NULL COMMENT 'Primary key for the table',
+        NAME VARCHAR(255) COMMENT 'Name of the item',
+        AMOUNT DECIMAL(18,2),
+        IS_ACTIVE BOOLEAN DEFAULT TRUE,
+        CREATED_DATE TIMESTAMP_LTZ(9),
+        CONSTRAINT PK_MY_TABLE PRIMARY KEY (ID),
+        FOREIGN KEY (ID) REFERENCES OTHER_TABLE(OTHER_ID)
+    );
+    """
+    columns = extract_columns_from_ddl(sample_ddl)
+    print("\nExtracted columns from sample DDL:")
+    # ... (print and check logic as before)
+    expected_columns = [
+        {"name": "ID", "type": "NUMBER(38,0)"},
+        {"name": "NAME", "type": "VARCHAR(255)"},
+        {"name": "AMOUNT", "type": "DECIMAL(18,2)"},
+        {"name": "IS_ACTIVE", "type": "BOOLEAN"},
+        {"name": "CREATED_DATE", "type": "TIMESTAMP_LTZ(9)"},
+    ]
+    if columns == expected_columns:
+        print("SUCCESS: DDL column extraction matches expected.")
+    else:
+        print("FAILURE: DDL column extraction DOES NOT match expected.")
+        print(f"  Actual: {columns}")
+        print(f"  Expected: {expected_columns}")
+
+
+    sample_ddl_2 = """
+    CREATE OR REPLACE TABLE ANOTHER_DB.ANOTHER_SCHEMA.ANOTHER_TABLE (
+        COL1 VARCHAR,
+        COL2 INTEGER COMMENT 'Some integer value',
+        COL3 TIMESTAMP_NTZ NOT NULL,
+        COL4 TEXT
+    );
+    """
+    columns_2 = extract_columns_from_ddl(sample_ddl_2)
+    print("\nExtracted columns from sample DDL 2:")
+    # ... (print and check logic as before)
+    expected_columns_2 = [
+        {"name": "COL1", "type": "VARCHAR"},
+        {"name": "COL2", "type": "INTEGER"},
+        {"name": "COL3", "type": "TIMESTAMP_NTZ"},
+        {"name": "COL4", "type": "TEXT"},
+    ]
+    if columns_2 == expected_columns_2:
+        print("SUCCESS: DDL column extraction 2 matches expected.")
+    else:
+        print("FAILURE: DDL column extraction 2 DOES NOT match expected.")
+        print(f"  Actual: {columns_2}")
+        print(f"  Expected: {expected_columns_2}")
+
+    sample_ddl_3 = """
+    CREATE TABLE MY_DB.COMPLEX_SCHEMA.COMPLEX_TABLE (
+        AMOUNT_NUM NUMBER(38, 9),
+        LONG_TEXT VARCHAR(16777216),
+        FLAG_VAL BOOLEAN
+    );
+    """
+    columns_3 = extract_columns_from_ddl(sample_ddl_3)
+    print("\nExtracted columns from sample DDL 3:")
+    # ... (print and check logic as before)
+    expected_columns_3 = [
+        {"name": "AMOUNT_NUM", "type": "NUMBER(38, 9)"},
+        {"name": "LONG_TEXT", "type": "VARCHAR(16777216)"},
+        {"name": "FLAG_VAL", "type": "BOOLEAN"},
+    ]
+    if columns_3 == expected_columns_3:
+        print("SUCCESS: DDL column extraction 3 matches expected.")
+    else:
+        print("FAILURE: DDL column extraction 3 DOES NOT match expected.")
+        print(f"  Actual: {columns_3}")
+        print(f"  Expected: {expected_columns_3}")
+
+    sample_ddl_view = """
+    CREATE VIEW MY_DB.MY_SCHEMA.MY_VIEW AS
+    SELECT ID, NAME FROM OTHER_TABLE;
+    """
+    columns_view = extract_columns_from_ddl(sample_ddl_view)
+    print("\nExtracted columns from sample VIEW DDL:")
+    if not columns_view:
+        print("  (No columns extracted, as expected for a VIEW)")
+    else:
+        print(f"  {columns_view}")
+    if not columns_view:
+        print("SUCCESS: DDL column extraction for VIEW DDL returns empty list as expected.")
+    else:
+        print("FAILURE: DDL column extraction for VIEW DDL returned non-empty list.")
+
+
+    print("\n--- Testing ddl_utils.py complete ---")

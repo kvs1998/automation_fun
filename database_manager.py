@@ -359,6 +359,21 @@ class DatabaseManager:
             print(f"Inserted column map for {column_map_dict['confluence_page_id']} -> {column_map_dict['confluence_target_field_name']} to {column_map_dict['ml_source_fqdn']} in {column_map_dict['ml_env']}.")
         self.conn.commit()
     
+    def get_confluence_ml_column_map_entry(self, confluence_page_id, confluence_target_field_name, ml_source_fqdn, ml_env, ml_object_type):
+        """Retrieves a single column mapping record."""
+        table_name = "confluence_ml_column_map"
+        composite_pk_names = [
+            'confluence_page_id', 'confluence_target_field_name',
+            'ml_source_fqdn', 'ml_env', 'ml_object_type'
+        ]
+        pk_where_clause = " AND ".join([f"{k} = ?" for k in composite_pk_names])
+        composite_pk_values = (confluence_page_id, confluence_target_field_name, ml_source_fqdn, ml_env, ml_object_type)
+        
+        cursor = self.conn.cursor()
+        cursor.execute(f"SELECT * FROM {table_name} WHERE {pk_where_clause}", composite_pk_values)
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    
     def _get_table_columns(self, table_name):
         cursor = self.conn.cursor()
         cursor.execute(f"PRAGMA table_info({table_name})")

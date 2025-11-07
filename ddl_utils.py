@@ -184,6 +184,7 @@ def extract_columns_from_ddl(ddl_string):
 
 
 # Test block for ddl_utils.py (NEW)
+# Test block for ddl_utils.py (MODIFIED to reflect robust parsing)
 if __name__ == "__main__":
     print("--- Testing ddl_utils.py functions ---")
 
@@ -214,16 +215,62 @@ if __name__ == "__main__":
         print("SUCCESS: DDL column extraction matches expected.")
     else:
         print("FAILURE: DDL column extraction DOES NOT match expected.")
+        print(f"  Actual: {columns}")
+        print(f"  Expected: {expected_columns}")
 
 
-    # Test validate_source_to_fqdn_map (will use actual DB if run)
-    try:
-        print("\n--- Testing validate_source_to_fqdn_map ---")
-        # Ensure your DB and resolver JSON are set up for this test
-        # results = validate_source_to_fqdn_map() 
-        # print(results)
-    except Exception as e:
-        print(f"Error during validate_source_to_fqdn_map test: {e}")
+    # Test with a DDL that has different formatting (e.g., no NOT NULL, different order)
+    sample_ddl_2 = """
+    CREATE OR REPLACE TABLE ANOTHER_DB.ANOTHER_SCHEMA.ANOTHER_TABLE (
+        COL1 VARCHAR,
+        COL2 INTEGER COMMENT 'Some integer value',
+        COL3 TIMESTAMP_NTZ NOT NULL,
+        COL4 TEXT
+    );
+    """
+    columns_2 = extract_columns_from_ddl(sample_ddl_2)
+    print("\nExtracted columns from sample DDL 2:")
+    for col in columns_2:
+        print(f"  - Name: {col['name']}, Type: {col['type']}")
+    
+    expected_columns_2 = [
+        {"name": "COL1", "type": "VARCHAR"},
+        {"name": "COL2", "type": "INTEGER"},
+        {"name": "COL3", "type": "TIMESTAMP_NTZ"},
+        {"name": "COL4", "type": "TEXT"},
+    ]
+    if columns_2 == expected_columns_2:
+        print("SUCCESS: DDL column extraction 2 matches expected.")
+    else:
+        print("FAILURE: DDL column extraction 2 DOES NOT match expected.")
+        print(f"  Actual: {columns_2}")
+        print(f"  Expected: {expected_columns_2}")
+
+    # Test with a DDL that has complex parameters
+    sample_ddl_3 = """
+    CREATE TABLE MY_DB.COMPLEX_SCHEMA.COMPLEX_TABLE (
+        AMOUNT_NUM NUMBER(38, 9),
+        LONG_TEXT VARCHAR(16777216),
+        FLAG_VAL BOOLEAN
+    );
+    """
+    columns_3 = extract_columns_from_ddl(sample_ddl_3)
+    print("\nExtracted columns from sample DDL 3:")
+    for col in columns_3:
+        print(f"  - Name: {col['name']}, Type: {col['type']}")
+    
+    expected_columns_3 = [
+        {"name": "AMOUNT_NUM", "type": "NUMBER(38, 9)"},
+        {"name": "LONG_TEXT", "type": "VARCHAR(16777216)"},
+        {"name": "FLAG_VAL", "type": "BOOLEAN"},
+    ]
+    if columns_3 == expected_columns_3:
+        print("SUCCESS: DDL column extraction 3 matches expected.")
+    else:
+        print("FAILURE: DDL column extraction 3 DOES NOT match expected.")
+        print(f"  Actual: {columns_3}")
+        print(f"  Expected: {expected_columns_3}")
+
+
     print("\n--- Testing ddl_utils.py complete ---")
-
 

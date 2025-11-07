@@ -108,12 +108,100 @@ def validate_source_to_fqdn_map(db_file=None):
             print(f"  - {s}")
 
 
-# Example usage (for testing this utility independently)
-if __name__ == "__main__":
-    try:
-        results = validate_source_to_fqdn_map()
-    except Exception as e:
-        print(f"Error during map validation: {e}")
 
-    print("\n--- FQDN Map Validation Complete ---")
-    return validation_results
+
+
+# Helper to parse column names and types from a Snowflake CREATE TABLE DDL string
+def extract_columns_from_ddl(ddl_string):
+    """
+    Parses a Snowflake CREATE TABLE DDL string to extract column names.
+    Ignores constraints and comments for column names.
+    
+    Args:
+        ddl_string (str): The CREATE TABLE DDL statement.
+        
+    Returns:
+        list: A list of dicts, each with 'name' and 'type' for a column.
+              Returns an empty list if DDL cannot be parsed.
+    """
+    columns = []
+    if not ddl_string or not isinstance(ddl_string, str):
+        return []
+
+    # Regex to find CREATE TABLE ... (...)
+    table_pattern = re.compile(r"CREATE (?:OR REPLACE )?TABLE (?:[^.( ]+\.)?[^.( ]+\.[^.( ]+\s*\((.*)\);", re.DOTALL | re.IGNORECASE)
+    match = table_pattern.search(ddl_string)
+
+    if not match:
+        print(f"WARNING: Could not find CREATE TABLE structure in DDL: {ddl_string[:100]}...")
+        return []
+
+    columns_part = match.group(1)
+    
+    # Split by comma, but handle commas within parentheses (e.g., in NUMBER(18,2))
+    # This regex is for splitting by comma outside of parentheses.
+    # It finds a comma (,) that is NOT followed by (any_chars), then another comma.
+    # This is often tricky. A simpler approach for DDL is often splitting lines and processing.
+    
+    # More robust DDL parsing: split into individual lines and process each
+    column_lines = [line.strip() for line in columns_part.splitlines() if line.strip() and not line.strip().startswith(')') and not line.strip().startswith('CONSTRAINT')]
+    
+    for line in column_lines:
+        # Regex to capture column name, type, and ignore everything after (comments, constraints, etc.)
+        # Examples: "  ID VARCHAR(16) NOT NULL,", "  NAME VARCHAR,", "  LAST_UPDATED_TS TIMESTAMP_LTZ COMMENT 'Last updated timestamp'"
+        column_match = re.match(r'^\s*([A-Z0-9_]+)\s+([A-Z0-9_]+\s*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)', line, re.IGNORECASE)
+        if column_match:
+            col_name = column_match.group(1).upper()
+            col_type = column_match.group(2).upper()
+            columns.append({"name": col_name, "type": col_type})
+        else:
+            # print(f"WARNING: Could not parse column from DDL line: '{line}'")
+            pass # Ignore lines that are not simple column definitions (e.g., table constraints)
+
+    return columns
+
+
+# Test block for ddl_utils.py (NEW)
+if __name__ == "__main__":
+    print("--- Testing ddl_utils.py functions ---")
+
+    # Test extract_columns_from_ddl
+    sample_ddl = """
+    CREATE TABLE MY_DB.MY_SCHEMA.MY_TABLE (
+        ID NUMBER(38,0) NOT NULL COMMENT 'Primary key for the table',
+        NAME VARCHAR(255) COMMENT 'Name of the item',
+        AMOUNT DECIMAL(18,2),
+        IS_ACTIVE BOOLEAN DEFAULT TRUE,
+        CREATED_DATE TIMESTAMP_LTZ(9),
+        CONSTRAINT PK_MY_TABLE PRIMARY KEY (ID)
+    );
+    """
+    columns = extract_columns_from_ddl(sample_ddl)
+    print("\nExtracted columns from sample DDL:")
+    for col in columns:
+        print(f"  - Name: {col['name']}, Type: {col['type']}")
+    
+    expected_columns = [
+        {"name": "ID", "type": "NUMBER(38,0)"},
+        {"name": "NAME", "type": "VARCHAR(255)"},
+        {"name": "AMOUNT", "type": "DECIMAL(18,2)"},
+        {"name": "IS_ACTIVE", "type": "BOOLEAN"},
+        {"name": "CREATED_DATE", "type": "TIMESTAMP_LTZ(9)"},
+    ]
+    if columns == expected_columns:
+        print("SUCCESS: DDL column extraction matches expected.")
+    else:
+        print("FAILURE: DDL column extraction DOES NOT match expected.")
+
+
+    # Test validate_source_to_fqdn_map (will use actual DB if run)
+    try:
+        print("\n--- Testing validate_source_to_fqdn_map ---")
+        # Ensure your DB and resolver JSON are set up for this test
+        # results = validate_source_to_fqdn_map() 
+        # print(results)
+    except Exception as e:
+        print(f"Error during validate_source_to_fqdn_map test: {e}")
+    print("\n--- Testing ddl_utils.py complete ---")
+
+

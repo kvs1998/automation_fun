@@ -74,6 +74,10 @@ class FilePaths:
     # NEW: Report output directory, same as TABLES_DIR for simplicity
     REPORT_OUTPUT_DIR = "tables"
 
+    DEFAULT_REPORT_ARGS_FILE = "default_ml_ddl_report_args.json"
+    # NEW: Data Type Mapping file
+    DATA_TYPE_MAP_FILE = "data_type_map.json"
+
 def get_confluence_page_titles(json_file_path="titles.json"):
     """
     Reads a list of Confluence page titles from a JSON file.
@@ -222,11 +226,48 @@ def load_fqdn_resolver(json_file_path=None):
     except Exception as e:
         raise Exception(f"An unexpected error occurred reading Source FQDN resolver file: {e}")
 
+# NEW: Function to load the data type mapping
+def load_data_type_map(json_file_path=FilePaths.DATA_TYPE_MAP_FILE):
+    """
+    Loads the Confluence data type to Snowflake data type mapping from a JSON file.
+    All keys (Confluence types) are converted to uppercase for case-insensitive matching.
+    """
+    if not os.path.exists(json_file_path):
+        raise FileNotFoundError(f"Data type map file not found at: {json_file_path}")
+    try:
+        def _raise_on_duplicate_keys(ordered_pairs):
+            d = {}
+            for k, v in ordered_pairs:
+                if k in d:
+                    raise ValueError(f"Duplicate key '{k}' found in '{json_file_path}' (case-sensitive). Please ensure all keys within the JSON file itself are unique.")
+                d[k] = v
+            return d
 
+        with open(json_file_path, 'r', encoding='utf-8') as f:
+            raw_type_map = json.load(f, object_pairs_hook=_raise_on_duplicate_keys)
+            
+            if not isinstance(raw_type_map, dict):
+                raise ValueError("Data type map file must contain a dictionary of key-value pairs.")
+            
+            # Convert all keys to uppercase for consistent, case-insensitive lookup
+            data_type_map = {k.upper(): v for k, v in raw_type_map.items()}
+            
+            # Basic validation of map values
+            for conf_type, sf_type in data_type_map.items():
+                if not isinstance(sf_type, str) or not sf_type.strip():
+                    raise ValueError(f"Snowflake type for Confluence type '{conf_type}' is invalid: '{sf_type}'. Must be a non-empty string.")
+            return data_type_map
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Error decoding Data Type map file: {e}")
+    except ValueError as e:
+        raise e
+    except Exception as e:
+        raise Exception(f"An unexpected error occurred reading Data Type map file: {e}")
+        
 # --- Test Block for load_fqdn_resolver ---
 if __name__ == "__main__":
-    print("--- Testing load_fqdn_resolver function ---")
-
+    print("--- Testing load_fqdn_resolver and load_data_type_map functions ---")
+    
     # Test Case 1: Valid resolver map with defaults and specific overrides
     print("\n=== Test Case 1: Valid map with defaults and specific overrides ===")
     test_valid_json_path = "test_valid_fqdn_resolver.json"
@@ -447,3 +488,36 @@ if __name__ == "__main__":
         FilePaths.SOURCE_FQDN_RESOLVER_FILE = original_resolver_file
 
     print("\n--- Testing load_fqdn_resolver function complete ---")
+
+    # NEW: Test load_data_type_map
+    print("\n=== Testing load_data_type_map function ===")
+    test_valid_type_map_path = "test_valid_data_type_map.json"
+    valid_type_map_content = {
+      "VARCHAR(6)": "VARCHAR(6)",
+      "INTEGER": "NUMBER",
+      "BOOLEAN": "BOOLEAN",
+      "STRING": "VARCHAR"
+    }
+    with open(test_valid_type_map_path, 'w', encoding='utf-8') as f:
+        json.dump(valid_type_map_content, f, indent=2)
+    
+    try:
+        original_type_map_file = FilePaths.DATA_TYPE_MAP_FILE
+        FilePaths.DATA_TYPE_MAP_FILE = test_valid_type_map_path
+
+        test_type_map = load_data_type_map()
+        print("Successfully loaded valid data type map:")
+        for k, v in test_type_map.items():
+            print(f"  '{k}' -> '{v}'")
+        if test_type_map.get("INTEGER") == "NUMBER" and test_type_map.get("string") == "VARCHAR": # Test case-insensitivity
+             print("  Case-insensitive lookup works.")
+        else:
+             print("  WARNING: Case-insensitive lookup not working as expected.")
+    except Exception as e:
+        print(f"ERROR in load_data_type_map (Valid map): {e}")
+    finally:
+        if os.path.exists(test_valid_type_map_path):
+            os.remove(test_valid_type_map_path)
+        FilePaths.DATA_TYPE_MAP_FILE = original_type_map_file
+
+    print("\n--- Testing load_data_type_map function complete ---")

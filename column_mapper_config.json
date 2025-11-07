@@ -1,0 +1,6 @@
+{
+  "match_threshold": 80,             // Score (0-100) above which a fuzzy match is considered valid
+  "match_strategy": "TOKEN_SET_RATIO", // Which fuzzywuzzy algorithm to use: RATIO, PARTIAL_RATIO, TOKEN_SORT_RATIO, TOKEN_SET_RATIO
+  "exact_match_only": false,         // If true, only 100% exact matches are accepted (overrides threshold)
+  "output_report_filename": "column_mapping_report.md" // Name of the generated report
+}

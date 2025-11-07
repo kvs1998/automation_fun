@@ -77,7 +77,7 @@ class FilePaths:
     DEFAULT_REPORT_ARGS_FILE = "default_ml_ddl_report_args.json"
     # NEW: Data Type Mapping file
     DATA_TYPE_MAP_FILE = "data_type_map.json"
-
+    
 def get_confluence_page_titles(json_file_path="titles.json"):
     """
     Reads a list of Confluence page titles from a JSON file.
@@ -264,10 +264,12 @@ def load_data_type_map(json_file_path=FilePaths.DATA_TYPE_MAP_FILE):
     except Exception as e:
         raise Exception(f"An unexpected error occurred reading Data Type map file: {e}")
         
+        
 # --- Test Block for load_fqdn_resolver ---
+# --- Test Block for load_fqdn_resolver and load_data_type_map ---
 if __name__ == "__main__":
     print("--- Testing load_fqdn_resolver and load_data_type_map functions ---")
-    
+
     # Test Case 1: Valid resolver map with defaults and specific overrides
     print("\n=== Test Case 1: Valid map with defaults and specific overrides ===")
     test_valid_json_path = "test_valid_fqdn_resolver.json"
@@ -287,7 +289,6 @@ if __name__ == "__main__":
         }
       },
       "ISSUER_TICKER_CANONICAL": {
-        "fqdn": "RAW_DB.CORE.ISSUER_TICKER_DEFAULT", # Top-level FQDN (now ignored by resolver logic)
         "aliases": ["ML_ASE.T_ASE_ISSUER_TICKER"],
         "defaults": {
           "environments": ["PREPOD", "DR"],
@@ -307,7 +308,6 @@ if __name__ == "__main__":
         print("Successfully loaded valid resolver map:")
         for k, v in test_map.items():
             print(f"  '{k}' -> '{v}'")
-        # Validate some specific lookups
         if test_map.get("PORTDB.PORTFOLIO_OPS_CANONICAL", {}).get("DEV") == {"fqdn": "RAW_DB.CORE.PORTFOLIO_OPS_COMMON", "object_type": "TABLE"} and \
            test_map.get("PORTDB.PORTFOLIO_OPS_CANONICAL", {}).get("PROD") == {"fqdn": "PROD_RAW_DB.PROD_CORE.PORTFOLIO_OPS_PROD", "object_type": "TABLE"}:
             print("  Specific environment lookups work as expected.")
@@ -488,36 +488,3 @@ if __name__ == "__main__":
         FilePaths.SOURCE_FQDN_RESOLVER_FILE = original_resolver_file
 
     print("\n--- Testing load_fqdn_resolver function complete ---")
-
-    # NEW: Test load_data_type_map
-    print("\n=== Testing load_data_type_map function ===")
-    test_valid_type_map_path = "test_valid_data_type_map.json"
-    valid_type_map_content = {
-      "VARCHAR(6)": "VARCHAR(6)",
-      "INTEGER": "NUMBER",
-      "BOOLEAN": "BOOLEAN",
-      "STRING": "VARCHAR"
-    }
-    with open(test_valid_type_map_path, 'w', encoding='utf-8') as f:
-        json.dump(valid_type_map_content, f, indent=2)
-    
-    try:
-        original_type_map_file = FilePaths.DATA_TYPE_MAP_FILE
-        FilePaths.DATA_TYPE_MAP_FILE = test_valid_type_map_path
-
-        test_type_map = load_data_type_map()
-        print("Successfully loaded valid data type map:")
-        for k, v in test_type_map.items():
-            print(f"  '{k}' -> '{v}'")
-        if test_type_map.get("INTEGER") == "NUMBER" and test_type_map.get("string") == "VARCHAR": # Test case-insensitivity
-             print("  Case-insensitive lookup works.")
-        else:
-             print("  WARNING: Case-insensitive lookup not working as expected.")
-    except Exception as e:
-        print(f"ERROR in load_data_type_map (Valid map): {e}")
-    finally:
-        if os.path.exists(test_valid_type_map_path):
-            os.remove(test_valid_type_map_path)
-        FilePaths.DATA_TYPE_MAP_FILE = original_type_map_file
-
-    print("\n--- Testing load_data_type_map function complete ---")

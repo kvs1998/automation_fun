@@ -1,11 +1,10 @@
 # snowflake_utils.py
 import snowflake.connector
-from config import load_snowflake_env_credentials # NEW: Import for dynamic creds
+from config import load_snowflake_env_credentials
 from datetime import datetime
 import json
 
 class SnowflakeManager:
-    # MODIFIED: __init__ now takes environment_name to load specific creds
     def __init__(self, environment_name):
         self.environment_name = environment_name
         self.conn = None
@@ -52,7 +51,7 @@ class SnowflakeManager:
             if cursor:
                 cursor.close()
 
-    def check_table_existence_and_get_ddl(self, fqdn, object_type='TABLE'): # Added object_type param
+    def check_table_existence_and_get_ddl(self, fqdn, object_type='TABLE'):
         """
         Checks if an object (TABLE or VIEW) exists and extracts its CREATE DDL from Snowflake.
         FQDN format: DATABASE.SCHEMA.TABLE_NAME
@@ -63,16 +62,13 @@ class SnowflakeManager:
         
         db_name, schema_name, object_name = parts[0], parts[1], parts[2]
         
-        # Determine table_type for INFORMATION_SCHEMA query
         if object_type.upper() == 'TABLE':
             table_type_clause = "TABLE_TYPE = 'BASE TABLE'"
         elif object_type.upper() == 'VIEW':
             table_type_clause = "TABLE_TYPE = 'VIEW'"
         else:
-            # For other custom types, assume BASE TABLE unless you have a way to query them specifically
             table_type_clause = "TABLE_TYPE = 'BASE TABLE'" 
 
-        # Check existence first using INFORMATION_SCHEMA
         existence_query = f"""
         SELECT COUNT(*)
         FROM {db_name}.INFORMATION_SCHEMA.TABLES
@@ -93,7 +89,6 @@ class SnowflakeManager:
 
         if object_exists:
             print(f"  {object_type} '{fqdn}' exists in Snowflake in '{self.environment_name}'. Attempting to extract DDL...")
-            # Use GET_DDL to extract the DDL, specifying object type
             ddl_query = f"SELECT GET_DDL('{object_type.upper()}', '{fqdn}');"
             try:
                 ddl_result = self._execute_query(ddl_query, fetch_results=True)
@@ -118,7 +113,6 @@ class SnowflakeManager:
             "table_name": object_name
         }
     
-    # NEW METHOD: Discover all tables and views within a given DB/Schema pattern
     def get_all_tables_and_views_in_pattern(self, db_pattern='%', schema_pattern='%'):
         """
         Discovers all tables and views in Snowflake for the connected environment
@@ -143,7 +137,7 @@ class SnowflakeManager:
                 db = row[0]
                 schema = row[1]
                 obj_name = row[2]
-                obj_type = row[3] # Will be 'TABLE' or 'VIEW'
+                obj_type = row[3]
 
                 discovered_objects.append({
                     "fqdn": f"{db}.{schema}.{obj_name}",
@@ -158,15 +152,12 @@ class SnowflakeManager:
             print(f"ERROR: Failed to discover objects in '{self.environment_name}': {e}")
             return []
 
-# Example usage (for testing this module independently)
 if __name__ == "__main__":
-    # Ensure your .env has Snowflake credentials set for 'DEV'
-    print("Testing SnowflakeManager with DEV environment...")
+    print("--- Testing SnowflakeManager with DEV environment ---")
     sf_manager_dev = None
     try:
         sf_manager_dev = SnowflakeManager(environment_name="DEV")
         
-        # Replace with an actual FQDN you expect to exist or not exist
         test_fqdn_table = "YOUR_DEV_DB.YOUR_DEV_SCHEMA.YOUR_DEV_TABLE" 
         test_fqdn_view = "YOUR_DEV_DB.YOUR_DEV_SCHEMA.YOUR_DEV_VIEW"
         
@@ -180,11 +171,8 @@ if __name__ == "__main__":
         for k, v in result_view.items():
             print(f"  {k}: {v}")
         
-        # Test get_all_tables_and_views_in_pattern (e.g., all objects in a specific schema)
         all_objects = sf_manager_dev.get_all_tables_and_views_in_pattern(db_pattern='YOUR_DEV_DB', schema_pattern='YOUR_DEV_SCHEMA')
         print(f"\nDiscovered objects in YOUR_DEV_DB.YOUR_DEV_SCHEMA: {len(all_objects)}")
-        # for obj in all_objects[:5]: # Print first 5
-        #     print(f"  - {obj['fqdn']} ({obj['object_type']})")
 
 
     except Exception as e:
@@ -192,3 +180,4 @@ if __name__ == "__main__":
     finally:
         if sf_manager_dev:
             sf_manager_dev.disconnect()
+    print("\n--- Testing SnowflakeManager complete ---")

@@ -112,7 +112,6 @@ def validate_source_to_fqdn_map(db_file=None):
 
 
 # Helper to parse column names and types from a Snowflake CREATE TABLE DDL string
-# Helper to parse column names and types from a Snowflake CREATE TABLE DDL string
 
 	def extract_columns_from_ddl(ddl_string):
 	    """
@@ -370,4 +369,3 @@ def validate_source_to_fqdn_map(db_file=None):
 	
 	
 	    print("\n--- Testing ddl_utils.py complete ---")
-

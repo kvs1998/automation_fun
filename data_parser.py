@@ -2,7 +2,7 @@
 import os
 import json
 from datetime import datetime
-import hashlib # For hash calculation
+import hashlib
 import re # For filename sanitization
 
 from config import ConfluenceConfig, FilePaths
@@ -147,9 +147,9 @@ def parse_and_store_confluence_content():
             except Exception as e_inner:
                 print(f"  FINAL DB WRITE FAILED for {api_title} (ID: {page_id}) with error: {e_inner}")
 
+
     db_manager.disconnect()
     print("\n--- Confluence Content Parsing and Storage Complete ---")
-    
 
 
 if __name__ == "__main__":

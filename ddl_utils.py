@@ -116,7 +116,7 @@ def validate_source_to_fqdn_map(db_file=None):
 def extract_columns_from_ddl(ddl_string):
     """
     Parses a Snowflake CREATE TABLE DDL string to extract column names and their types.
-    It robustly handles constraints, comments, nullability, and default values.
+    It robustly handles skipping table-level constraints like PRIMARY KEY, FOREIGN KEY, etc.
     
     Args:
         ddl_string (str): The CREATE TABLE DDL statement.
@@ -130,7 +130,7 @@ def extract_columns_from_ddl(ddl_string):
         return []
 
     # Regex to find CREATE TABLE ... (...) and capture the content inside the parentheses
-    # Uses re.DOTALL to match newlines inside the parentheses
+    # This block contains all column definitions, constraints, etc.
     table_pattern = re.compile(r"CREATE (?:OR REPLACE )?TABLE (?:[^.( ]+\.)?[^.( ]+\.[^.( ]+\s*\((.*)\);", re.DOTALL | re.IGNORECASE)
     match = table_pattern.search(ddl_string)
 
@@ -138,52 +138,79 @@ def extract_columns_from_ddl(ddl_string):
         print(f"WARNING: Could not find CREATE TABLE structure in DDL: {ddl_string[:100]}...")
         return []
 
-    columns_part = match.group(1) # This contains all column definitions, constraints, etc.
-
-    # NEW ROBUST PARSING STRATEGY:
-    # Use a regex that specifically targets column definitions, ignoring everything else.
-    # This regex is designed to be more flexible, capturing the column name and its type,
-    # and then ignoring constraints, comments, etc., on the same line.
+    columns_and_constraints_block = match.group(1)
     
-    # Components:
+    # NEW ROBUST PARSING STRATEGY:
+    # 1. Split the block into potential individual definitions.
+    # 2. Identify what looks like a column definition.
+    # 3. Filter out known constraint patterns.
+
+    # Split by comma, but intelligently. This is often tricky.
+    # A common SQL parsing technique is to split by commas ONLY if they are not inside parentheses.
+    # However, for Snowflake's GET_DDL, often each column is on its own line.
+    # Let's process line by line after stripping.
+
+    column_lines = [line.strip() for line in columns_and_constraints_block.splitlines() if line.strip()]
+
+    # Regex for a single column definition line:
     # ^\s*                       - Start of line, optional leading whitespace
-    # ([A-Z0-9_]+)               - Group 1: Column Name (alphanumeric, underscore)
+    # ([A-Z0-9_]+)               - Group 1: Column Name (e.g., ID)
     # \s+                        - At least one space
-    # ([A-Z0-9_]+\s*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\))?) - Group 2: Data Type (e.g., VARCHAR, NUMBER(38,0))
-    #                                                    (Base type + optional params)
-    # (?:                        - Non-capturing group for the rest of the line (optional constraints, comments, commas)
+    # ([A-Z0-9_]+\s*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\))?) - Group 2: Data Type (e.g., NUMBER(38,0), VARCHAR(255))
+    #                            - Base type + optional params (e.g., NUMBER, (38,0))
+    # (?:                        - Non-capturing group for the rest of the line (optional modifiers/comments)
     #   \s+                      - At least one space
-    #   (?:NOT NULL|DEFAULT|COMMENT|PRIMARY KEY|FOREIGN KEY|UNIQUE|CHECK|AUTOINCREMENT|\w+)+ - Keywords to ignore
+    #   (?:NOT NULL|DEFAULT|COMMENT|AUTOINCREMENT|\w+)+ - Keywords that are part of column defs
     #   .*?                      - Any characters non-greedily
-    # )?                         - The entire non-capturing group is optional
-    # \s*                        - Optional trailing whitespace
+    # )?                         - The entire rest-of-line group is optional
     # ,?                         - Optional trailing comma
     # $                          - End of line
     
-    # We will refine this to specifically look for columns and their types.
-    # The crucial part is to correctly handle the type definition which can have parameters.
-    
-    # This regex attempts to find (NAME TYPE) pattern and ignore anything after that.
-    # It accounts for spaces in type names (e.g., TIMESTAMP LTZ) if that's how Snowflake returns them,
-    # but based on GET_DDL, it's usually `TIMESTAMP_LTZ`.
     column_def_pattern = re.compile(
-        r'^\s*([A-Z0-9_]+)\s+'  # Group 1: Column Name (e.g., ID)
-        r'([A-Z0-9_]+\s*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)' # Group 2: Data Type (e.g., NUMBER(38,0), VARCHAR(255))
-        r'(?:(?!\s+(?:CONSTRAINT|PRIMARY KEY|FOREIGN KEY)).)*?' # Non-greedy match anything until a constraint starts or end of line.
-                                                                # This is the key to ignore "NOT NULL", "DEFAULT", "COMMENT" etc.
-        r'(?:,|$)', # Match trailing comma or end of line (but don't capture)
-        re.IGNORECASE | re.MULTILINE
+        r'^\s*([A-Z0-9_]+)\s+'  # Group 1: Column Name
+        r'([A-Z0-9_]+\s*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)' # Group 2: Data Type
+        r'(?:(?!\s+CONSTRAINT|\s+PRIMARY KEY|\s+FOREIGN KEY|\s+UNIQUE|\s+CHECK).)*', # Negative lookahead to ensure we don't match a line that's actually a table constraint (non-greedy)
+                                                                                  # This ignores "NOT NULL", "DEFAULT", "COMMENT" if they are present.
+        re.IGNORECASE
     )
-    
-    for match in column_def_pattern.finditer(columns_part):
-        col_name = match.group(1).strip().upper()
-        col_type = match.group(2).strip().upper()
-        columns.append({"name": col_name, "type": col_type})
+
+    # Patterns to explicitly identify and IGNORE table-level constraints
+    # These typically start the line with 'CONSTRAINT', 'PRIMARY KEY (', 'FOREIGN KEY (' etc.
+    table_constraint_patterns = [
+        re.compile(r'^\s*CONSTRAINT\s+', re.IGNORECASE),
+        re.compile(r'^\s*PRIMARY\s+KEY\s*\(', re.IGNORECASE),
+        re.compile(r'^\s*FOREIGN\s+KEY\s*\(', re.IGNORECASE),
+        re.compile(r'^\s*UNIQUE\s*\(', re.IGNORECASE),
+        re.compile(r'^\s*CHECK\s*\(', re.IGNORECASE),
+    ]
+
+    for line in column_lines:
+        # First, check if this line is clearly a table-level constraint
+        is_constraint_line = False
+        for pattern in table_constraint_patterns:
+            if pattern.match(line):
+                is_constraint_line = True
+                break
+        
+        if is_constraint_line:
+            # print(f"DEBUG: Skipping constraint line: '{line}'")
+            continue # Skip this line, it's a table-level constraint
+
+        # If not a constraint, try to parse it as a column definition
+        column_match = column_def_pattern.match(line)
+        if column_match:
+            col_name = column_match.group(1).strip().upper()
+            col_type = column_match.group(2).strip().upper()
+            columns.append({"name": col_name, "type": col_type})
+        else:
+            # print(f"WARNING: Could not parse column from DDL line (or it's an unhandled constraint/modifier): '{line}'")
+            pass # Ignore lines that don't match a column definition pattern
+
 
     return columns
 
 
-# Test block for ddl_utils.py (NEW)
+
 # Test block for ddl_utils.py (MODIFIED to reflect robust parsing)
 if __name__ == "__main__":
     print("--- Testing ddl_utils.py functions ---")
@@ -196,7 +223,8 @@ if __name__ == "__main__":
         AMOUNT DECIMAL(18,2),
         IS_ACTIVE BOOLEAN DEFAULT TRUE,
         CREATED_DATE TIMESTAMP_LTZ(9),
-        CONSTRAINT PK_MY_TABLE PRIMARY KEY (ID)
+        CONSTRAINT PK_MY_TABLE PRIMARY KEY (ID),
+        FOREIGN KEY (ID) REFERENCES OTHER_TABLE(OTHER_ID)
     );
     """
     columns = extract_columns_from_ddl(sample_ddl)
@@ -270,6 +298,22 @@ if __name__ == "__main__":
         print("FAILURE: DDL column extraction 3 DOES NOT match expected.")
         print(f"  Actual: {columns_3}")
         print(f"  Expected: {expected_columns_3}")
+
+    # Test with a DDL that has a CREATE VIEW (should not match CREATE TABLE pattern)
+    sample_ddl_view = """
+    CREATE VIEW MY_DB.MY_SCHEMA.MY_VIEW AS
+    SELECT ID, NAME FROM OTHER_TABLE;
+    """
+    columns_view = extract_columns_from_ddl(sample_ddl_view)
+    print("\nExtracted columns from sample VIEW DDL:")
+    if not columns_view:
+        print("  (No columns extracted, as expected for a VIEW)")
+    else:
+        print(f"  {columns_view}")
+    if not columns_view:
+        print("SUCCESS: DDL column extraction for VIEW DDL returns empty list as expected.")
+    else:
+        print("FAILURE: DDL column extraction for VIEW DDL returned non-empty list.")
 
 
     print("\n--- Testing ddl_utils.py complete ---")

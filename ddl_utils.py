@@ -115,8 +115,7 @@ def validate_source_to_fqdn_map(db_file=None):
 def extract_columns_from_ddl(ddl_string):
     """
     Parses a Snowflake CREATE TABLE DDL string to extract column names and their types.
-    It is designed to be highly robust to various formatting, complex DEFAULT clauses,
-    and table-level constraints.
+    It robustly handles complex DEFAULT clauses and table-level PRIMARY KEY definitions.
     
     Args:
         ddl_string (str): The CREATE TABLE DDL statement from Snowflake.
@@ -129,37 +128,33 @@ def extract_columns_from_ddl(ddl_string):
     if not ddl_string or not isinstance(ddl_string, str):
         return []
 
-    # NEW HIGHLY ROBUST TABLE PATTERN:
-    # Captures the content inside the FIRST outermost parentheses of a CREATE TABLE statement.
-    # This accounts for 'OR REPLACE', multi-part table names, and allows any content within parentheses.
+    # Regex to find CREATE TABLE ... (...) and capture the content inside the parentheses
+    # This block contains all column definitions and table-level constraints.
     table_pattern = re.compile(
-        r"CREATE (?:OR REPLACE )?TABLE \S+(?:\.\S+){1,2}\s*\("  # Matches CREATE TABLE DB.SCHEMA.TABLE (
-        r"(.*?)"                                            # Group 1: Captures everything non-greedily until the next part
-        r"\)[^;]*;",                                         # Matches the closing parenthesis, optional non-semicolons, then semicolon
-        re.DOTALL | re.IGNORECASE                           # DOTALL to match newlines, IGNORECASE for flexibility
+        r"CREATE (?:OR REPLACE )?TABLE \S+(?:\.\S+){1,2}\s*\((.*)\)[^;]*;",
+        re.DOTALL | re.IGNORECASE
     )
     match = table_pattern.search(ddl_string)
 
     if not match:
-        print(f"WARNING: Could not find CREATE TABLE structure in DDL: {ddl_string[:100].replace('\n', ' ')}...")
+        # FIX: Corrected f-string usage for backslash
+        preview_ddl_string = ddl_string[:100].replace('\n', ' ').strip()
+        print(f"WARNING: Could not find CREATE TABLE structure in DDL: {preview_ddl_string}...")
         return []
 
-    columns_and_constraints_block = match.group(1) # This is the entire content inside the main ( )
+    columns_and_constraints_block = match.group(1)
     
-    # NEW ROBUST COLUMN DEFINITION PATTERN:
-    # This pattern is applied line-by-line or on segments of the block.
-    # It specifically targets COLUMN NAME and DATA TYPE, and then ignores everything else on that line.
-    
+    # Regex for a single column definition line:
     column_def_pattern = re.compile(
-        r'^\s*([A-Z0-9_]+)\s+'  # Group 1: Column Name (alphanumeric, underscore)
-        r'([A-Z0-9_]+\s*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)' # Group 2: Data Type (e.g., VARCHAR(6), NUMBER(38,0))
+        r'^\s*([A-Z0-9_]+)\s+'  # Group 1: Column Name
+        r'([A-Z0-9_]+\s*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)' # Group 2: Data Type
         r'(?:'                                              # Start non-capturing group for modifiers to ignore
         r'\s+'                                              # One or more spaces
         r'(?:NOT\s+NULL|DEFAULT(?:\s+CAST\(.*?\)\s*)?|COMMENT\s+\'.*?\'|[A-Z0-9_]+)' # Common modifiers (DEFAULT CAST handled)
         r')*?'                                              # Match zero or more modifiers non-greedily
-        r',?'                                               # Optional trailing comma
+        r'(?:,)?'                                           # Optional comma at end
         r'$',                                               # End of line
-        re.IGNORECASE | re.MULTILINE                        # IGNORECASE and MULTILINE for line-by-line processing
+        re.IGNORECASE
     )
 
     # Patterns to explicitly identify and IGNORE table-level constraints
@@ -175,9 +170,8 @@ def extract_columns_from_ddl(ddl_string):
     for line in columns_and_constraints_block.splitlines():
         stripped_line = line.strip()
         if not stripped_line:
-            continue # Skip empty lines
+            continue
 
-        # First, check if this line is clearly a table-level constraint
         is_constraint_line = False
         for pattern in table_constraint_patterns:
             if pattern.match(stripped_line):
@@ -185,17 +179,13 @@ def extract_columns_from_ddl(ddl_string):
                 break
         
         if is_constraint_line:
-            continue # Skip this line, it's a table-level constraint
+            continue
 
-        # If not a constraint, try to parse it as a column definition
         column_match = column_def_pattern.match(stripped_line)
         if column_match:
             col_name = column_match.group(1).upper()
             col_type = column_match.group(2).upper()
             columns.append({"name": col_name, "type": col_type})
-        # else:
-            # print(f"DEBUG: Could not parse column from line: '{stripped_line}'")
-
 
     return columns
 

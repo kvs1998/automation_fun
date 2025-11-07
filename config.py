@@ -77,6 +77,9 @@ class FilePaths:
     DEFAULT_REPORT_ARGS_FILE = "default_ml_ddl_report_args.json"
     # NEW: Data Type Mapping file
     DATA_TYPE_MAP_FILE = "data_type_map.json"
+
+    # NEW: Column Mapper Configuration File
+    COLUMN_MAPPER_CONFIG_FILE = "column_mapper_config.json"
     
 def get_confluence_page_titles(json_file_path="titles.json"):
     """
@@ -226,6 +229,38 @@ def load_fqdn_resolver(json_file_path=None):
     except Exception as e:
         raise Exception(f"An unexpected error occurred reading Source FQDN resolver file: {e}")
 
+# NEW: Function to load column mapper configuration
+def load_column_mapper_config(json_file_path=FilePaths.COLUMN_MAPPER_CONFIG_FILE):
+    """
+    Loads column mapper configuration from a JSON file.
+    """
+    if not os.path.exists(json_file_path):
+        raise FileNotFoundError(f"Column mapper config file not found at: {json_file_path}")
+    try:
+        with open(json_file_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+            if not isinstance(config, dict):
+                raise ValueError("Column mapper config file must contain a dictionary.")
+            
+            # Basic validation of expected keys
+            if 'match_threshold' not in config or not isinstance(config['match_threshold'], (int, float)):
+                raise ValueError("Column mapper config must contain 'match_threshold' (int/float).")
+            if 'match_strategy' not in config or not isinstance(config['match_strategy'], str):
+                raise ValueError("Column mapper config must contain 'match_strategy' (str, e.g., 'ratio', 'token_set_ratio').")
+            if config['match_strategy'].upper() not in ["RATIO", "PARTIAL_RATIO", "TOKEN_SORT_RATIO", "TOKEN_SET_RATIO"]:
+                 raise ValueError(f"Invalid match_strategy: '{config['match_strategy']}'. Must be one of RATIO, PARTIAL_RATIO, TOKEN_SORT_RATIO, TOKEN_SET_RATIO.")
+
+            # Ensure match_threshold is within 0-100
+            config['match_threshold'] = max(0, min(100, config['match_threshold']))
+            
+            return config
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Error decoding Column Mapper config file: {e}")
+    except ValueError as e:
+        raise e
+    except Exception as e:
+        raise Exception(f"An unexpected error occurred reading Column Mapper config file: {e}")
+        
 # NEW: Function to load the data type mapping
 def load_data_type_map(json_file_path=FilePaths.DATA_TYPE_MAP_FILE):
     """

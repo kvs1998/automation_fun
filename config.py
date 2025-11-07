@@ -265,7 +265,10 @@ def load_data_type_map(json_file_path=FilePaths.DATA_TYPE_MAP_FILE):
         raise Exception(f"An unexpected error occurred reading Data Type map file: {e}")
         
         
+        
 # --- Test Block for load_fqdn_resolver ---
+# --- Test Block for load_fqdn_resolver and load_data_type_map ---
+
 # --- Test Block for load_fqdn_resolver and load_data_type_map ---
 if __name__ == "__main__":
     print("--- Testing load_fqdn_resolver and load_data_type_map functions ---")
@@ -488,3 +491,4 @@ if __name__ == "__main__":
         FilePaths.SOURCE_FQDN_RESOLVER_FILE = original_resolver_file
 
     print("\n--- Testing load_fqdn_resolver function complete ---")
+    

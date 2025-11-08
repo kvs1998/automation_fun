@@ -62,7 +62,7 @@ def resolve_snowflake_data_type(confluence_data_type, data_type_map):
     is_fundamentally_malformed = False
 
     try:
-        type_statement = parse_one(f"SELECT CAST(1 AS {cleaned_conf_type})", read="duckdb") 
+        type_statement = parse_one(f"SELECT CAST(1 AS {cleaned_conf_type})", read="snowflake") 
         data_type_node = next(type_statement.find_all(exp.DataType), None)
 
         if data_type_node:

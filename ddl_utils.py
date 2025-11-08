@@ -112,10 +112,14 @@ def validate_source_to_fqdn_map(db_file=None):
 
 
 # Helper to parse column names and types from a Snowflake CREATE TABLE DDL string
+from sqlglot import parse_one, exp
+from sqlglot.errors import ParseError
+
+
 def extract_columns_from_ddl(ddl_string):
     """
-    Parses a Snowflake CREATE TABLE DDL string to extract column names and their types.
-    It robustly handles complex DEFAULT clauses and table-level PRIMARY KEY definitions.
+    Parses a Snowflake CREATE TABLE DDL string using sqlglot to extract column names and their types.
+    It robustly handles various formatting, constraints, and complex default values.
     
     Args:
         ddl_string (str): The CREATE TABLE DDL statement from Snowflake.
@@ -128,64 +132,52 @@ def extract_columns_from_ddl(ddl_string):
     if not ddl_string or not isinstance(ddl_string, str):
         return []
 
-    # Regex to find CREATE TABLE ... (...) and capture the content inside the parentheses
-    # This block contains all column definitions and table-level constraints.
-    table_pattern = re.compile(
-        r"CREATE (?:OR REPLACE )?TABLE \S+(?:\.\S+){1,2}\s*\((.*)\)[^;]*;",
-        re.DOTALL | re.IGNORECASE
-    )
-    match = table_pattern.search(ddl_string)
-
-    if not match:
-        # FIX: Corrected f-string usage for backslash
-        preview_ddl_string = ddl_string[:100].replace('\n', ' ').strip()
-        print(f"WARNING: Could not find CREATE TABLE structure in DDL: {preview_ddl_string}...")
-        return []
-
-    columns_and_constraints_block = match.group(1)
-    
-    # Regex for a single column definition line:
-    column_def_pattern = re.compile(
-        r'^\s*([A-Z0-9_]+)\s+'  # Group 1: Column Name
-        r'([A-Z0-9_]+\s*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)' # Group 2: Data Type
-        r'(?:'                                              # Start non-capturing group for modifiers to ignore
-        r'\s+'                                              # One or more spaces
-        r'(?:NOT\s+NULL|DEFAULT(?:\s+CAST\(.*?\)\s*)?|COMMENT\s+\'.*?\'|[A-Z0-9_]+)' # Common modifiers (DEFAULT CAST handled)
-        r')*?'                                              # Match zero or more modifiers non-greedily
-        r'(?:,)?'                                           # Optional comma at end
-        r'$',                                               # End of line
-        re.IGNORECASE
-    )
-
-    # Patterns to explicitly identify and IGNORE table-level constraints
-    table_constraint_patterns = [
-        re.compile(r'^\s*CONSTRAINT\s+', re.IGNORECASE),
-        re.compile(r'^\s*PRIMARY\s+KEY\s*\(', re.IGNORECASE),
-        re.compile(r'^\s*FOREIGN\s+KEY\s*\(', re.IGNORECASE),
-        re.compile(r'^\s*UNIQUE\s*\(', re.IGNORECASE),
-        re.compile(r'^\s*CHECK\s*\(', re.IGNORECASE),
-    ]
-
-    # Process each line from the DDL block
-    for line in columns_and_constraints_block.splitlines():
-        stripped_line = line.strip()
-        if not stripped_line:
-            continue
-
-        is_constraint_line = False
-        for pattern in table_constraint_patterns:
-            if pattern.match(stripped_line):
-                is_constraint_line = True
-                break
+    try:
+        # Parse the DDL string using sqlglot, specifying the Snowflake dialect
+        # parse_one returns an Expression object (the AST)
+        # We need to ensure it's a CREATE TABLE statement
+        expression = parse_one(ddl_string, dialect="snowflake")
         
-        if is_constraint_line:
-            continue
+        if not isinstance(expression, exp.Create):
+            print(f"WARNING: DDL is not a CREATE statement. Skipping: {ddl_string[:100].replace('\n', ' ')}...")
+            return []
 
-        column_match = column_def_pattern.match(stripped_line)
-        if column_match:
-            col_name = column_match.group(1).upper()
-            col_type = column_match.group(2).upper()
-            columns.append({"name": col_name, "type": col_type})
+        # Find the TABLE expression within the CREATE statement
+        table_expression = expression.this # The main object being created
+
+        # Iterate through the expressions (definitions) within the table creation
+        # These are usually arguments to the CREATE TABLE, like column definitions and constraints
+        for element in expression.expressions: # Accessing arguments
+            if isinstance(element, exp.ColumnDef):
+                # If it's a ColumnDef expression, extract name and data type
+                col_name = element.this.name.upper() # Column name
+                col_type = element.args.get('kind').this.name.upper() # Data type name
+                
+                # Extract parameters like (38,0) for NUMBER or (255) for VARCHAR
+                # The 'this' of the 'kind' expression is the base type (e.g., NUMBER),
+                # its expressions are the parameters
+                type_params = []
+                for param in element.args.get('kind').expressions:
+                    if isinstance(param, exp.DataTypeParam): # For NUMBER(P,S) or VARCHAR(L)
+                        type_params.append(param.this.name)
+                    # More complex parameters might need custom handling
+                
+                if type_params:
+                    # Reconstruct type string, e.g., "NUMBER(38,0)"
+                    full_col_type = f"{col_type}({', '.join(type_params)})"
+                else:
+                    full_col_type = col_type
+
+                columns.append({"name": col_name, "type": full_col_type})
+            # We explicitly ignore other elements like exp.Constraint (PRIMARY KEY, FOREIGN KEY)
+            # or exp.Comment, etc., as we are only interested in column definitions here.
+
+    except ParseError as e:
+        print(f"ERROR: SQLGlot Parse Error for DDL: {ddl_string[:100].replace('\n', ' ')}... Error: {e}")
+        return []
+    except Exception as e:
+        print(f"ERROR: An unexpected error occurred during DDL parsing with SQLGlot: {e}. DDL: {ddl_string[:100].replace('\n', ' ')}...")
+        return []
 
     return columns
 
@@ -194,9 +186,9 @@ def extract_columns_from_ddl(ddl_string):
 def validate_source_to_fqdn_map(db_file=None):
     # ... (unchanged)
 
-# Test block for ddl_utils.py (MODIFIED with your ML DDL and expanded tests)
+# Test block for ddl_utils.py (UPDATED with sqlglot for DDL parsing)
 if __name__ == "__main__":
-    print("--- Testing ddl_utils.py functions ---")
+    print("--- Testing ddl_utils.py functions (with SQLGlot) ---")
 
     # Your provided ML DDL example
     ml_ddl_example = """

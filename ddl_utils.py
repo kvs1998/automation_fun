@@ -109,9 +109,6 @@ def validate_source_to_fqdn_map(db_file=None):
 
 
 
-
-
-
 def extract_columns_from_ddl(ddl_string):
     """
     Parses a Snowflake CREATE TABLE DDL string using sqlglot to extract column names and their types.
@@ -131,46 +128,30 @@ def extract_columns_from_ddl(ddl_string):
     try:
         # Parse the DDL string using sqlglot, specifying the Snowflake dialect
         expression = parse_one(ddl_string, dialect="snowflake")
-        
-        # Ensure it's a CREATE statement of type TABLE
-        # We can look for `exp.Create` where the `this` argument is an `exp.Table`
-        if not (isinstance(expression, exp.Create) and isinstance(expression.this, exp.Table)):
+
+        if not isinstance(expression, exp.Create):
             preview_ddl_string = ddl_string[:100].replace('\n', ' ').strip()
-            # More specific warning
-            if isinstance(expression, exp.Create) and isinstance(expression.this, exp.View):
-                print(f"WARNING: DDL is a CREATE VIEW statement. Skipping column extraction for views: {preview_ddl_string}...")
-            else:
-                print(f"WARNING: DDL is not a CREATE TABLE statement. Skipping: {preview_ddl_string}...")
+            print(f"WARNING: DDL is not a CREATE statement. Skipping: {preview_ddl_string}...")
             return []
 
-        # Iterate directly to find all ColumnDef expressions within the AST
-        # This is the most direct and robust way to get column definitions.
-        for column_def_expression in expression.find_all(exp.ColumnDef):
-            col_name = column_def_expression.this.name.upper() # Column name
+        # MODIFIED: Iterating over `expression.this` for direct access to column/constraint definitions
+        for element in expression.this:
+            if isinstance(element, exp.ColumnDef):
+                col_name = element.this.name.upper()
+                col_type = element.args.get('kind').this.name.upper()
+                
+                type_params = []
+                for param in element.args.get('kind').expressions:
+                    if isinstance(param, exp.DataTypeParam):
+                        type_params.append(param.this.name)
+                
+                if type_params:
+                    full_col_type = f"{col_type}({', '.join(type_params)})"
+                else:
+                    full_col_type = col_type
 
-            # The data type is often nested under .args['kind']
-            type_kind_expression = column_def_expression.args.get('kind')
-            
-            if not type_kind_expression:
-                print(f"WARNING: Could not determine type for column '{col_name}'. Skipping.")
-                continue
-
-            base_type = type_kind_expression.this.name.upper() # Base type (e.g., VARCHAR, NUMBER)
-            
-            # Extract parameters like (38,0) for NUMBER or (255) for VARCHAR
-            type_params = []
-            for param in type_kind_expression.expressions: # Params are expressions of the kind
-                # Data type parameters are typically DataTypeParam expressions
-                if isinstance(param, exp.DataTypeParam): 
-                    type_params.append(param.this.name)
-            
-            if type_params:
-                # Reconstruct full type string, e.g., "NUMBER(38,0)"
-                full_col_type = f"{base_type}({', '.join(type_params)})"
-            else:
-                full_col_type = base_type
-
-            columns.append({"name": col_name, "type": full_col_type})
+                columns.append({"name": col_name, "type": full_col_type})
+            # Explicitly ignore other elements like exp.Constraint as we only want column definitions
 
     except ParseError as e:
         preview_ddl_string = ddl_string[:100].replace('\n', ' ').strip()
@@ -182,6 +163,7 @@ def extract_columns_from_ddl(ddl_string):
         return []
 
     return columns
+    
 
 # Test block for ddl_utils.py (UPDATED with sqlglot for DDL parsing)
 if __name__ == "__main__":

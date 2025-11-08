@@ -20,6 +20,39 @@ CHECK_ENVIRONMENTS = [
     # Add other environments like "QA", "UAT", "PROD", "DR", "ELD" as needed
 ]
 
+
+# NEW: Global constants for Snowflake Base Types and Type Synonyms
+# Used by data_type_mapper.py for validation and type resolution
+SNOWFLAKE_VALID_BASE_TYPES = {
+    "NUMBER", "DECIMAL", "NUMERIC", "INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT",
+    "FLOAT", "FLOAT4", "FLOAT8", "DOUBLE", "DOUBLE PRECISION", "REAL",
+    "VARCHAR", "CHAR", "CHARACTER", "STRING", "TEXT",
+    "BINARY", "VARBINARY",
+    "BOOLEAN",
+    "DATE", "TIME", "TIMESTAMP", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ",
+    "VARIANT", "OBJECT", "ARRAY",
+    "GEOGRAPHY", "GEOMETRY"
+}
+
+TYPE_SYNONYMS = {
+    "INT": "NUMBER",
+    "BIGINT": "NUMBER",
+    "SMALLINT": "NUMBER",
+    "TINYINT": "NUMBER",
+    "BYTEINT": "NUMBER",
+    "NUM": "NUMBER",
+    "DEC": "NUMBER",
+    "DOUBLE PRECISION": "FLOAT",
+    "TEXT": "VARCHAR",
+    "STR": "VARCHAR",
+    "STRING": "VARCHAR",
+    "BOOL": "BOOLEAN",
+    "DATETIME": "TIMESTAMP_NTZ",
+    "DATE_TIME": "TIMESTAMP_NTZ",
+    "TIMESTAMP_NO_TZ": "TIMESTAMP_NTZ",
+    "TIMESTAMP_WITH_TZ": "TIMESTAMP_LTZ"
+}
+
 class ConfluenceConfig:
     BASE_URL = os.getenv("CONFLUENCE_BASE_URL")
     API_TOKEN = os.getenv("CONFLUENCE_API_TOKEN")

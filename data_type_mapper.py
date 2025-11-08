@@ -4,9 +4,10 @@ import json
 from datetime import datetime
 import argparse
 import re
-from tabulate import tabulate
+from tabulate import tabulate # For pretty printing tables in Markdown
 
-from config import FilePaths, load_data_type_map, SNOWFLAKE_VALID_BASE_TYPES, TYPE_SYNONYMS # NEW IMPORTS
+# NEW: Import necessary constants and functions from config.py
+from config import FilePaths, load_data_type_map, SNOWFLAKE_VALID_BASE_TYPES, TYPE_SYNONYMS
 from database_manager import DatabaseManager
 from confluence_utils import clean_special_characters_iterative # Assumed to be available
 
@@ -22,13 +23,13 @@ def resolve_snowflake_data_type(confluence_data_type, data_type_map):
     
     Args:
         confluence_data_type (str): The raw data type string from Confluence (e.g., "VARCHAR(6)", "NUMBER", "Integer").
-        data_type_map (dict): The loaded data type mapping (keys are uppercase Confluence base types, values are Snowflake types).
+        data_type_map (dict): The loaded data type mapping (keys are uppercase Confluence base types).
         
     Returns:
         tuple: (resolved_snowflake_type: str, warnings: list[str])
     """
     warnings = []
-    # Ultimate default if nothing else works
+    # Ultimate default if nothing else works or is fundamentally malformed/unrecognized
     resolved_type_internal = "VARCHAR(16777216)" 
     
     if not confluence_data_type or not isinstance(confluence_data_type, str):
@@ -37,62 +38,93 @@ def resolve_snowflake_data_type(confluence_data_type, data_type_map):
 
     cleaned_conf_type = confluence_data_type.upper().strip()
     
-    parsed_base_type = None
+    # Handle composite types like "FLOAT or NUMBER" before main regex, converting to canonical.
+    if "FLOAT OR NUMBER" in cleaned_conf_type:
+        cleaned_conf_type = cleaned_conf_type.replace("FLOAT OR NUMBER", "NUMBER")
+    
+    parsed_base_type_raw = None # What sqlglot extracts as the base type
+    parsed_base_type_canonical = None # After applying TYPE_SYNONYMS
     parsed_params = [] # e.g., ["38", "0"] for NUMBER(38,0)
+
+    is_fundamentally_malformed = False # Flag to decide if we default immediately
 
     # --- Step 1: Use SQLGlot to robustly parse the Confluence data type string ---
     try:
-        # sqlglot can parse data type declarations like "NUMBER(38,0)" directly
-        # If it's something like "VARCHAR(232 NUMBER(23,34...", sqlglot will likely fail here.
-        # Use read="snowflake" to leverage Snowflake's type parsing rules.
-        # Wrap it in a SELECT to force parsing as a valid statement, then extract the type.
-        type_expr = parse_one(f"SELECT CAST(1 AS {cleaned_conf_type})", read="snowflake")
-        # Navigate the AST to find the DataType expression
-        data_type_node = next(type_expr.find_all(exp.DataType), None)
+        # sqlglot needs a full statement to parse robustly. Use CAST(1 AS ...)
+        # The 'read' dialect should be 'snowflake' to understand types like TIMESTAMP_LTZ
+        # We try to parse the DataType node specifically.
+        
+        # We need to construct a "fake" valid DDL fragment for sqlglot to parse the type
+        # For example, "SELECT CAST(1 AS VARCHAR(10))"
+        # Then we extract the DataType from the CAST expression.
+        
+        # parse_one expects a full statement, so wrap the type in a dummy CAST
+        # Using a slightly less strict dialect for initial parse, then validate against SF
+        type_statement = parse_one(f"SELECT CAST(1 AS {cleaned_conf_type})", read="duckdb") 
+        data_type_node = next(type_statement.find_all(exp.DataType), None)
 
         if data_type_node:
             parsed_base_type_raw = data_type_node.this.name.upper()
             
-            # Apply type synonyms to the base type identified by sqlglot
-            parsed_base_type = TYPE_SYNONYMS.get(parsed_base_type_raw, parsed_base_type_raw)
+            # Apply TYPE_SYNONYMS to the base type identified by sqlglot for canonical lookup
+            parsed_base_type_canonical = TYPE_SYNONYMS.get(parsed_base_type_raw, parsed_base_type_raw)
 
             for param in data_type_node.expressions:
                 if isinstance(param, exp.DataTypeParam):
                     parsed_params.append(param.this.name)
+                # Note: sqlglot automatically validates parameter format for valid types.
+                # If parameters were truly malformed, parse_one would have failed.
         else:
-            # If sqlglot parsed the CAST but didn't identify a DataType node (unlikely for a type string)
+            # If sqlglot parsed the CAST but didn't identify a DataType node, it's an issue
             warnings.append(f"SQLGlot could not identify a valid DataType node for '{confluence_data_type}'. Defaulting to VARCHAR.")
-            return resolved_type_internal, warnings
+            is_fundamentally_malformed = True # Treat as fundamentally malformed
+            
 
     except ParseError as e:
-        warnings.append(f"Malformed or unrecognized data type format: '{confluence_data_type}' (SQLGlot error: {e}). Defaulting to VARCHAR.")
-        return resolved_type_internal, warnings # Return default if parsing fails
+        warnings.append(f"Malformed or unrecognized data type format: '{confluence_data_type}' (SQLGlot parse error: {e}). Defaulting to VARCHAR.")
+        is_fundamentally_malformed = True
     except Exception as e:
         warnings.append(f"Unexpected error during SQLGlot parsing for '{confluence_data_type}': {e}. Defaulting to VARCHAR.")
-        return resolved_type_internal, warnings
+        is_fundamentally_malformed = True
     
-    # --- Step 2: Validate parsed base type against known Snowflake types ---
-    if parsed_base_type not in SNOWFLAKE_VALID_BASE_TYPES:
-        warnings.append(f"Parsed base type '{parsed_base_type}' (from '{confluence_data_type}') is not a known Snowflake base type. Defaulting to VARCHAR.")
-        return resolved_type_internal, warnings # Return default if not a valid SF base type
+    
+    # --- Check for mismatched parentheses (independent of SQLGlot, as it might handle them leniently) ---
+    if cleaned_conf_type.count('(') != cleaned_conf_type.count(')'):
+        warnings.append(f"Mismatched parentheses in type '{confluence_data_type}'. Parameters will be discarded.")
+        parsed_params = [] # Discard parameters if parentheses are mismatched
+        is_fundamentally_malformed = True
 
-    # --- Step 3: Resolve using data_type_map and re-assemble type string ---
-    snowflake_base_type_from_map = data_type_map.get(parsed_base_type)
+
+    # --- DECISION POINT: If fundamentally malformed, use ultimate default ---
+    if is_fundamentally_malformed:
+        return resolved_type_internal, warnings 
+
+
+    # --- If not fundamentally malformed, proceed with validation and mapping attempt ---
+    # Validate parsed_base_type_canonical against known SNOWFLAKE_VALID_BASE_TYPES
+    if parsed_base_type_canonical not in SNOWFLAKE_VALID_BASE_TYPES:
+        warnings.append(f"Parsed base type '{parsed_base_type_canonical}' (from '{confluence_data_type}') is not a known Snowflake base type. Defaulting to VARCHAR.")
+        return resolved_type_internal, warnings 
+
+
+    # --- Step 2: Resolve using data_type_map and re-assemble type string ---
+    snowflake_base_type_from_map = data_type_map.get(parsed_base_type_canonical)
 
     if snowflake_base_type_from_map:
         # Special handling for NUMBER/INTEGER default precision if SME doesn't specify
-        if snowflake_base_type_from_map.upper() == 'NUMBER' and parsed_base_type in ['NUMBER', 'INTEGER', 'INT', 'DECIMAL', 'NUMERIC']:
+        if snowflake_base_type_from_map.upper() == 'NUMBER' and parsed_base_type_canonical in ['NUMBER', 'INTEGER', 'INT', 'DECIMAL', 'NUMERIC']:
             if not parsed_params: # If Confluence didn't specify precision/scale
                 return "NUMBER(38,0)", warnings
         
         # General case: Reconstruct type string with parsed parameters
+        # Re-assemble parameters using how sqlglot provided them (list of strings)
         if parsed_params and (snowflake_base_type_from_map.upper() in ["VARCHAR", "NUMBER", "DECIMAL", "CHAR", "STRING", "TEXT", "TIMESTAMP_LTZ", "TIMESTAMP_NTZ", "TIMESTAMP_TZ", "TIME", "FLOAT", "DOUBLE"]):
             return f"{snowflake_base_type_from_map}({', '.join(parsed_params)})", warnings
         else:
             return snowflake_base_type_from_map, warnings # No parameters or not compatible with parameters
     else:
         # If the base type is not found in the map, default to VARCHAR
-        warnings.append(f"Confluence data type '{confluence_data_type}' (base: '{parsed_base_type}') not found in map. Defaulting to VARCHAR.")
+        warnings.append(f"Confluence data type '{confluence_data_type}' (base: '{parsed_base_type_canonical}') not found in map. Defaulting to VARCHAR.")
         return resolved_type_internal, warnings
 
 
@@ -126,6 +158,8 @@ def generate_data_type_report(config_file=None):
             parsed_content_json_str = row['parsed_json']
             if parsed_content_json_str:
                 parsed_content = json.loads(parsed_content_json_str)
+                # Assume already clean from data_parser.py
+                # Re-clean if source of parsed_json might contain uncleaned strings later
                 cleaned_parsed_content = parsed_content 
                 
                 for table_data in cleaned_parsed_content.get('tables', []):
@@ -168,13 +202,14 @@ def generate_data_type_report(config_file=None):
         
         notes = "; ".join(warnings_list) 
 
-        is_malformed_syntax = any("Malformed" in w or "Unrecognized" in w or "SQLGlot Parse Error" in w or "Unexpected error during SQLGlot parsing" in w for w in warnings_list)
+        # Categorize for separate report sections based on warning content
+        is_malformed_syntax = any("Malformed" in w or "Unrecognized" in w or "SQLGlot parse" in w or "Unexpected error during SQLGlot parsing" in w or "Mismatched" in w for w in warnings_list)
         is_not_known_sf_base_type = any("not a known Snowflake base type" in w for w in warnings_list)
         is_unmapped_in_json = any("not found in map" in w for w in warnings_list)
 
         if is_malformed_syntax or is_not_known_sf_base_type:
             syntax_or_malformed_warnings[conf_type] = warnings_list
-        elif is_unmapped_in_json: # Only categorize as unmapped if it's not also malformed
+        elif is_unmapped_in_json: # Only categorize as unmapped if it's not also malformed or unknown base type
             unmapped_types_for_action[conf_type] = ", ".join(sorted(list(confluence_data_types_with_sources[conf_type])))
         
         if not notes:

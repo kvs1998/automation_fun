@@ -111,10 +111,6 @@ def validate_source_to_fqdn_map(db_file=None):
 
 
 
-# Helper to parse column names and types from a Snowflake CREATE TABLE DDL string
-from sqlglot import parse_one, exp
-from sqlglot.errors import ParseError
-
 
 def extract_columns_from_ddl(ddl_string):
     """
@@ -134,19 +130,23 @@ def extract_columns_from_ddl(ddl_string):
 
     try:
         # Parse the DDL string using sqlglot, specifying the Snowflake dialect
-        # parse_one returns an Expression object (the AST)
-        # We need to ensure it's a CREATE TABLE statement
         expression = parse_one(ddl_string, dialect="snowflake")
         
+        # Check if it's a CREATE statement (e.g., CREATE TABLE, CREATE VIEW)
         if not isinstance(expression, exp.Create):
-            print(f"WARNING: DDL is not a CREATE statement. Skipping: {ddl_string[:100].replace('\n', ' ')}...")
+            # FIX: Corrected f-string usage for backslash
+            preview_ddl_string = ddl_string[:100].replace('\n', ' ').strip()
+            print(f"WARNING: DDL is not a CREATE statement. Skipping: {preview_ddl_string}...")
             return []
 
-        # Find the TABLE expression within the CREATE statement
-        table_expression = expression.this # The main object being created
+        # Ensure it's specifically a CREATE TABLE statement
+        # Check if `expression.this` is an instance of `exp.Table`
+        if not isinstance(expression.this, exp.Table):
+            preview_ddl_string = ddl_string[:100].replace('\n', ' ').strip()
+            print(f"WARNING: DDL is a CREATE statement but not a TABLE. Skipping: {preview_ddl_string}...")
+            return []
 
         # Iterate through the expressions (definitions) within the table creation
-        # These are usually arguments to the CREATE TABLE, like column definitions and constraints
         for element in expression.expressions: # Accessing arguments
             if isinstance(element, exp.ColumnDef):
                 # If it's a ColumnDef expression, extract name and data type
@@ -154,16 +154,13 @@ def extract_columns_from_ddl(ddl_string):
                 col_type = element.args.get('kind').this.name.upper() # Data type name
                 
                 # Extract parameters like (38,0) for NUMBER or (255) for VARCHAR
-                # The 'this' of the 'kind' expression is the base type (e.g., NUMBER),
-                # its expressions are the parameters
                 type_params = []
                 for param in element.args.get('kind').expressions:
                     if isinstance(param, exp.DataTypeParam): # For NUMBER(P,S) or VARCHAR(L)
                         type_params.append(param.this.name)
-                    # More complex parameters might need custom handling
                 
                 if type_params:
-                    # Reconstruct type string, e.g., "NUMBER(38,0)"
+                    # Reconstruct full type string, e.g., "NUMBER(38,0)"
                     full_col_type = f"{col_type}({', '.join(type_params)})"
                 else:
                     full_col_type = col_type
@@ -173,18 +170,16 @@ def extract_columns_from_ddl(ddl_string):
             # or exp.Comment, etc., as we are only interested in column definitions here.
 
     except ParseError as e:
-        print(f"ERROR: SQLGlot Parse Error for DDL: {ddl_string[:100].replace('\n', ' ')}... Error: {e}")
+        preview_ddl_string = ddl_string[:100].replace('\n', ' ').strip()
+        print(f"ERROR: SQLGlot Parse Error for DDL: {preview_ddl_string}... Error: {e}")
         return []
     except Exception as e:
-        print(f"ERROR: An unexpected error occurred during DDL parsing with SQLGlot: {e}. DDL: {ddl_string[:100].replace('\n', ' ')}...")
+        preview_ddl_string = ddl_string[:100].replace('\n', ' ').strip()
+        print(f"ERROR: An unexpected error occurred during DDL parsing with SQLGlot: {e}. DDL: {preview_ddl_string}...")
         return []
 
     return columns
 
-
-# validate_source_to_fqdn_map function (remains unchanged)
-def validate_source_to_fqdn_map(db_file=None):
-    # ... (unchanged)
 
 # Test block for ddl_utils.py (UPDATED with sqlglot for DDL parsing)
 if __name__ == "__main__":

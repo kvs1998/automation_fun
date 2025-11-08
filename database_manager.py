@@ -107,7 +107,15 @@ class DatabaseManager:
         sql_create_confluence_ml_column_map = """
         CREATE TABLE IF NOT EXISTS confluence_ml_column_map (
             confluence_page_id INTEGER NOT NULL,
-            confluence_target_field_name TEXT NOT NULL,
+            confluence_page_title TEXT NOT NULL,           -- NEW: Page title for context
+            confluence_source_field_name TEXT NOT NULL,    -- NEW: Original source field name from Confluence
+            confluence_target_field_name TEXT NOT NULL,    -- The intended target column name from Confluence
+            confluence_data_type TEXT NOT NULL,            -- The data type from Confluence
+            confluence_ddl_sf_type TEXT NOT NULL,          -- NEW: Resolved Snowflake data type (from data_type_mapper)
+            confluence_is_pk INTEGER NOT NULL DEFAULT 0,   -- NEW: 1 if PK in Confluence, 0 otherwise
+            confluence_definition TEXT,                    -- NEW: Definition from Confluence
+            confluence_comments TEXT,                      -- NEW: Comments from Confluence
+
             ml_source_fqdn TEXT NOT NULL,
             ml_env TEXT NOT NULL,
             ml_object_type TEXT NOT NULL,
@@ -120,8 +128,8 @@ class DatabaseManager:
             ml_source_ddl_hash_at_mapping TEXT,
             last_mapped_on TEXT NOT NULL,
             notes TEXT,
-            user_override INTEGER NOT NULL DEFAULT 0,    -- 0 for false, 1 for true. Manual override by user.
-            is_active INTEGER NOT NULL DEFAULT 1,        -- NEW: 0 for inactive/orphaned, 1 for active.
+            user_override INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
 
             PRIMARY KEY (confluence_page_id, confluence_target_field_name, ml_source_fqdn, ml_env, ml_object_type),
             
@@ -311,7 +319,8 @@ class DatabaseManager:
         row = cursor.fetchone()
         return dict(row) if row else None
     
-    # MODIFIED: insert_or_update_confluence_ml_column_map - updated for is_active
+
+    # MODIFIED METHOD: insert_or_update_confluence_ml_column_map - updated for new columns
     def insert_or_update_confluence_ml_column_map(self, column_map_dict):
         """
         Inserts or updates a column mapping record in confluence_ml_column_map.
@@ -359,6 +368,7 @@ class DatabaseManager:
             print(f"Inserted column map for {column_map_dict['confluence_page_id']} -> {column_map_dict['confluence_target_field_name']} to {column_map_dict['ml_source_fqdn']} in {column_map_dict['ml_env']}.")
         self.conn.commit()
     
+    # NEW METHOD: get_confluence_ml_column_map_entry - unchanged
     def get_confluence_ml_column_map_entry(self, confluence_page_id, confluence_target_field_name, ml_source_fqdn, ml_env, ml_object_type):
         """Retrieves a single column mapping record."""
         table_name = "confluence_ml_column_map"
